@@ -1,0 +1,651 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Estado de Cuenta — ML Logistics</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&display=swap" rel="stylesheet">
+  <script src="https://cdn.jsdelivr.net/npm/xlsx@0.18.5/dist/xlsx.full.min.js"></script>
+  <link rel="stylesheet" href="styles.css?v=7" onerror="this.onerror=null;this.href='/static/styles.css?v=7';" />
+</head>
+<body>
+  <div class="app-shell">
+    <!-- Left Vertical Icon Rail -->
+    <aside class="left-rail">
+      <div class="brand-logo-wrap" onclick="switchTab('dashboard')" title="ML Logistics - Estado de Cuenta">
+        <img src="logo.png" onerror="this.onerror=null;this.src='/static/logo.png';" alt="ML Logistics Logo" />
+      </div>
+
+      <nav class="rail-nav">
+        <!-- 1. Dashboard -->
+        <button class="rail-btn active" id="rail-dashboard" onclick="switchTab('dashboard')" title="Dashboard & Resumen Semanal">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round">
+            <rect x="3" y="3" width="7" height="9" rx="1.5"/>
+            <rect x="14" y="3" width="7" height="5" rx="1.5"/>
+            <rect x="14" y="12" width="7" height="9" rx="1.5"/>
+            <rect x="3" y="16" width="7" height="5" rx="1.5"/>
+          </svg>
+          <span class="rail-label">Dashboard</span>
+        </button>
+
+        <!-- 2. Diferencias -->
+        <button class="rail-btn" id="rail-auditoria" onclick="switchTab('auditoria')" title="Diferencias entre Statements">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round">
+            <polyline points="16 3 21 3 21 8"/>
+            <line x1="4" y1="20" x2="21" y2="3"/>
+            <polyline points="21 16 21 21 16 21"/>
+            <line x1="15" y1="15" x2="21" y2="21"/>
+            <line x1="4" y1="4" x2="9" y2="9"/>
+          </svg>
+          <span class="rail-label">Diferencias</span>
+          <span class="rail-badge" id="rail-alert-badge" style="display:none;">0</span>
+        </button>
+
+        <!-- 3. Master List -->
+        <button class="rail-btn" id="rail-master" onclick="switchTab('master')" title="Master List (Referencias y Cargos)">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round">
+            <rect x="3" y="3" width="18" height="18" rx="2"/>
+            <line x1="3" y1="9" x2="21" y2="9"/>
+            <line x1="3" y1="15" x2="21" y2="15"/>
+            <line x1="9" y1="9" x2="9" y2="21"/>
+          </svg>
+          <span class="rail-label">Master List</span>
+        </button>
+
+        <!-- 4. Accounting -->
+        <button class="rail-btn" id="rail-accounting" onclick="switchTab('accounting')" title="Accounting Summary (Pagos y Saldos)">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round">
+            <circle cx="12" cy="12" r="9"/>
+            <path d="M15 9.5a3.5 2.5 0 0 0-3-1.5h-1a2.5 2.5 0 0 0 0 5h2a2.5 2.5 0 0 1 0 5h-1a3.5 2.5 0 0 1-3-1.5"/>
+            <line x1="12" y1="6" x2="12" y2="18"/>
+          </svg>
+          <span class="rail-label">Accounting</span>
+        </button>
+
+        <!-- 5. Concentrado vs Stmt -->
+        <button class="rail-btn" id="rail-clientes" onclick="switchTab('clientes')" title="Concentrado ML 2026 vs Statement">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round">
+            <path d="M9 3H5a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h4"/>
+            <path d="M15 3h4a2 2 0 0 1 2 2v14a2 2 0 0 1-2 2h-4"/>
+            <path d="M8 10l3 2-3 2"/>
+            <path d="M16 14l-3-2 3-2"/>
+            <line x1="12" y1="3" x2="12" y2="21" stroke-dasharray="2 2"/>
+          </svg>
+          <span class="rail-label">Concentrado</span>
+        </button>
+      </nav>
+    </aside>
+
+    <!-- Main Right Area -->
+    <div class="main-area">
+      <!-- Top Navbar (Fixed) -->
+      <header class="top-navbar">
+        <div class="top-nav-left">
+          <div class="app-brand-title" onclick="switchTab('dashboard')">
+            <span class="brand-title-main">Estado de Cuenta</span>
+            <span class="brand-title-sub">ML LOGISTICS</span>
+          </div>
+
+          <div class="top-tabs">
+            <button class="top-tab active" id="tab-dashboard" onclick="switchTab('dashboard')">
+              <svg class="top-tab-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                <rect x="3" y="3" width="7" height="9" rx="1.5"/>
+                <rect x="14" y="3" width="7" height="5" rx="1.5"/>
+                <rect x="14" y="12" width="7" height="9" rx="1.5"/>
+                <rect x="3" y="16" width="7" height="5" rx="1.5"/>
+              </svg>
+              Dashboard
+            </button>
+            <button class="top-tab" id="tab-auditoria" onclick="switchTab('auditoria')">
+              <svg class="top-tab-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                <polyline points="16 3 21 3 21 8"/>
+                <line x1="4" y1="20" x2="21" y2="3"/>
+                <polyline points="21 16 21 21 16 21"/>
+                <line x1="15" y1="15" x2="21" y2="21"/>
+                <line x1="4" y1="4" x2="9" y2="9"/>
+              </svg>
+              Diferencias
+              <span class="tab-pill-count" id="tab-badge-diff">0</span>
+            </button>
+            <button class="top-tab" id="tab-master" onclick="switchTab('master')">
+              <svg class="top-tab-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                <rect x="3" y="3" width="18" height="18" rx="2"/>
+                <line x1="3" y1="9" x2="21" y2="9"/>
+                <line x1="3" y1="15" x2="21" y2="15"/>
+                <line x1="9" y1="9" x2="9" y2="21"/>
+              </svg>
+              Master List
+              <span class="tab-pill-count" id="tab-badge-master">0</span>
+            </button>
+            <button class="top-tab" id="tab-accounting" onclick="switchTab('accounting')">
+              <svg class="top-tab-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                <circle cx="12" cy="12" r="9"/>
+                <path d="M15 9.5a3.5 2.5 0 0 0-3-1.5h-1a2.5 2.5 0 0 0 0 5h2a2.5 2.5 0 0 1 0 5h-1a3.5 2.5 0 0 1-3-1.5"/>
+                <line x1="12" y1="6" x2="12" y2="18"/>
+              </svg>
+              Accounting
+            </button>
+            <button class="top-tab" id="tab-clientes" onclick="switchTab('clientes')">
+              <svg class="top-tab-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                <path d="M9 3H5a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h4"/>
+                <path d="M15 3h4a2 2 0 0 1 2 2v14a2 2 0 0 1-2 2h-4"/>
+                <path d="M8 10l3 2-3 2"/>
+                <path d="M16 14l-3-2 3-2"/>
+                <line x1="12" y1="3" x2="12" y2="21" stroke-dasharray="2 2"/>
+              </svg>
+              Concentrado vs Stmt
+              <span class="tab-pill-count" id="tab-badge-conc">0</span>
+            </button>
+          </div>
+        </div>
+
+        <div class="top-actions">
+          <div class="stmt-selector-group">
+            <label for="select-stmt">Corte:</label>
+            <select id="select-stmt" class="stmt-select" onchange="onStatementChange()"></select>
+            <label for="select-compare">vs</label>
+            <select id="select-compare" class="stmt-select" onchange="onCompareChange()"></select>
+          </div>
+
+          <button class="btn-soft" onclick="downloadConcentradoFile()" title="Descargar CONCENTRADO ML LOGISTICS ELIEZER 2026.xlsx">
+            ⬇️ Descargar Concentrado
+          </button>
+
+          <button class="btn-gold" onclick="triggerFileInput()">
+            📥 Cargar Statement
+          </button>
+          <input type="file" id="hidden-file-input" accept=".xlsx" style="display:none" onchange="handleFileSelect(event)" />
+        </div>
+      </header>
+
+      <!-- ================= VIEW 1: DASHBOARD & CARGA SEMANAL ================= -->
+      <div id="view-dashboard" class="workspace-body">
+        <main>
+          <div class="section-header-row">
+            <div>
+              <h1 class="section-title" id="dash-headline">Métrica del Statement Semanal</h1>
+              <p class="section-subtitle" id="dash-subheadline">Cargando historial de statements...</p>
+            </div>
+            <div style="display:flex; gap:8px; align-items:center;">
+              <button class="btn-soft" onclick="syncOneDriveFolder()">🔄 Sincronizar OneDrive</button>
+              <span class="status-pill" id="dash-sync-badge">21 Statements Sincronizados</span>
+            </div>
+          </div>
+
+          <!-- 3 KPI Cards with Golden/Taupe Sparklines (matching reference image) -->
+          <div class="kpi-row">
+            <div class="kpi-card" onclick="switchTab('master')">
+              <div class="kpi-label">
+                <span>Embarques en Master List</span>
+                <span class="kpi-delta-pill" id="kpi-containers-delta">+0 nuevos</span>
+              </div>
+              <div class="kpi-value-row">
+                <span class="kpi-value" id="kpi-containers-val">—</span>
+              </div>
+              <div class="kpi-subtext" id="kpi-containers-sub">Total Cost Master: $0.00</div>
+              <svg class="kpi-sparkline" id="spark-containers" viewBox="0 0 260 48" preserveAspectRatio="none"></svg>
+            </div>
+
+            <div class="kpi-card" onclick="switchTab('auditoria')">
+              <div class="kpi-label">
+                <span>Alertas de Cargos Extras</span>
+                <span class="kpi-delta-pill" id="kpi-extras-delta">Revisar</span>
+              </div>
+              <div class="kpi-value-row">
+                <span class="kpi-value" id="kpi-extras-val">0 ⚠️</span>
+              </div>
+              <div class="kpi-subtext" id="kpi-extras-sub">Cambios en Amend, EXW, Inland, Previo o Total</div>
+              <svg class="kpi-sparkline" id="spark-extras" viewBox="0 0 260 48" preserveAspectRatio="none"></svg>
+            </div>
+
+            <div class="kpi-card" onclick="switchTab('clientes')">
+              <div class="kpi-label">
+                <span>Cruce vs Concentrado 2026</span>
+                <span class="kpi-delta-pill" id="kpi-conc-delta">Auditoría</span>
+              </div>
+              <div class="kpi-value-row">
+                <span class="kpi-value" id="kpi-conc-val">—</span>
+              </div>
+              <div class="kpi-subtext" id="kpi-conc-sub">Diferencias detectadas contra el Concentrado</div>
+              <svg class="kpi-sparkline" id="spark-balance" viewBox="0 0 260 48" preserveAspectRatio="none"></svg>
+            </div>
+          </div>
+
+          <!-- Resumen Financiero Ejecutivo: Cuánto Debo vs Cuánto Me Deben + Margen de Ganancia -->
+          <div class="fin-summary-strip" id="fin-summary-strip">
+            <div class="fin-summary-header">
+              <div class="fin-summary-title">
+                💰 Resumen Financiero y Margen de Ganancia (Eliezer vs Concentrado Clientes 2026)
+              </div>
+              <span class="fin-summary-badge" id="fin-summary-badge">Cálculo en tiempo real</span>
+            </div>
+
+            <div class="fin-summary-grid">
+              <!-- Bloque 1: Cuánto Debo (Eliezer) -->
+              <div class="fin-metric-box" onclick="switchTab('accounting')" title="Ver detalle en Accounting Summary">
+                <div class="fin-metric-top">
+                  <span class="fin-metric-label">📤 Cuánto Debo (Saldo Eliezer)</span>
+                  <span class="fin-tag fin-tag-Red" id="fin-debo-tag">Por pagar</span>
+                </div>
+                <div class="fin-metric-val fin-val-payable" id="fin-debo-val">—</div>
+                <div class="fin-metric-sub" id="fin-debo-sub">
+                  Costo Total: — · Abonado: —
+                </div>
+              </div>
+
+              <!-- Bloque 2: Cuánto Me Deben (Clientes Concentrado) -->
+              <div class="fin-metric-box" onclick="switchTab('clientes')" title="Ver Cuenta General en Concentrado">
+                <div class="fin-metric-top">
+                  <span class="fin-metric-label">📥 Cuánto Me Deben (Clientes)</span>
+                  <span class="fin-tag fin-tag-Blue" id="fin-medeben-tag">Por cobrar</span>
+                </div>
+                <div class="fin-metric-val fin-val-receivable" id="fin-medeben-val">—</div>
+                <div class="fin-metric-sub" id="fin-medeben-sub">
+                  Facturado en Concentrado: —
+                </div>
+              </div>
+
+              <!-- Bloque 3: Diferencia de Cartera (Me deben - Debo) -->
+              <div class="fin-metric-box" onclick="switchTab('clientes')">
+                <div class="fin-metric-top">
+                  <span class="fin-metric-label">⚖️ Balance Neto (Me Deben − Debo)</span>
+                  <span class="fin-tag fin-tag-Gold" id="fin-neto-tag">Flujo Cartera</span>
+                </div>
+                <div class="fin-metric-val fin-val-net" id="fin-neto-val">—</div>
+                <div class="fin-metric-sub" id="fin-neto-sub">
+                  Respaldo en cuentas por cobrar sobre deuda con Eliezer
+                </div>
+              </div>
+
+              <!-- Bloque 4: Margen de Ganancia Operativa (Facturado - Costo Eliezer) -->
+              <div class="fin-metric-box fin-metric-highlight" onclick="switchTab('clientes')" title="Ganancia bruta sumando todos los embarques 2026">
+                <div class="fin-metric-top">
+                  <span class="fin-metric-label">📈 Mi Margen de Ganancia (2026)</span>
+                  <span class="fin-tag fin-tag-Green" id="fin-margen-pct">0.0% margen</span>
+                </div>
+                <div class="fin-metric-val fin-val-profit" id="fin-margen-val">—</div>
+                <div class="fin-metric-sub" id="fin-margen-sub">
+                  Cobrado: — vs Costo Eliezer: —
+                </div>
+              </div>
+            </div>
+          </div>
+
+          <!-- Drag & Drop Weekly Statement Uploader + Timeline of the 21 Statements -->
+          <div class="card-panel">
+            <div class="card-panel-header">
+              <div class="card-panel-title">
+                📂 Carga de Statement Semanal (`2026 Eliezer STATEMENT AAAAMMDD.xlsx`)
+              </div>
+              <span style="font-size:12px; color:var(--text-muted);" id="workspace-path-label">Sincronizado con carpeta OneDrive</span>
+            </div>
+
+            <div class="upload-dropzone" id="dropzone" onclick="triggerFileInput()">
+              <div class="upload-dropzone-left">
+                <div class="upload-icon-circle">
+                  <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                    <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/>
+                    <polyline points="17 8 12 3 7 8"/>
+                    <line x1="12" y1="3" x2="12" y2="15"/>
+                  </svg>
+                </div>
+                <div>
+                  <div class="upload-title">Arrastra aquí el nuevo archivo Excel de Eliezer o haz clic para seleccionarlo</div>
+                  <div class="upload-desc">
+                    Se guardará automáticamente en tu carpeta OneDrive y analizará al instante <strong>Master list</strong>, <strong>ACCOUNTING SUMMARY</strong> y diferencias contra tu <strong>Concentrado 2026</strong>.
+                  </div>
+                </div>
+              </div>
+              <button class="btn-gold" type="button" onclick="event.stopPropagation(); triggerFileInput();">
+                Seleccionar .XLSX
+              </button>
+            </div>
+
+            <div style="margin-top:16px;">
+              <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:4px;">
+                <span style="font-size:12px; font-weight:700; color:var(--text-secondary); text-transform:uppercase; letter-spacing:0.04em;">
+                  Línea de Tiempo de Statements Cargados (Haz clic en cualquier fecha para auditarla)
+                </span>
+                <span style="font-size:12px; color:var(--text-muted);" id="timeline-count-label"></span>
+              </div>
+              <div class="timeline-strip" id="timeline-strip"></div>
+            </div>
+          </div>
+
+          <!-- Radar de Cargos Extras y Modificaciones de Monto -->
+          <div class="card-panel">
+            <div class="card-panel-header">
+              <div>
+                <div class="card-panel-title">
+                  ⚠️ Cargos Extras y Modificaciones de Monto Detectados en este Statement
+                </div>
+                <p style="font-size:12.5px; color:var(--text-secondary); margin-top:2px;">
+                  Embarques existentes cuyo costo cambió respecto al Statement anterior (Amend Fee, EXW Fee, Inland Fee, Previo, Insurance, Sea Freight o Total Cost).
+                </p>
+              </div>
+              <button class="btn-soft" onclick="switchTab('clientes')">
+                Cruzar con Concentrado →
+              </button>
+            </div>
+
+            <div class="table-wrap">
+              <table class="ml-table">
+                <thead>
+                  <tr>
+                    <th>REF / INV NO</th>
+                    <th>Cliente (Customer / For)</th>
+                    <th>Contenedor</th>
+                    <th>Cargos Modificados (Antes → Ahora)</th>
+                    <th>Total Anterior</th>
+                    <th>Total Nuevo</th>
+                    <th>Estado</th>
+                    <th>Acción</th>
+                  </tr>
+                </thead>
+                <tbody id="dash-cost-changes-tbody"></tbody>
+              </table>
+            </div>
+          </div>
+
+          <!-- Embarques Nuevos Recientes -->
+          <div class="card-panel">
+            <div class="card-panel-header">
+              <div class="card-panel-title" id="dash-new-shipments-title">
+                🚢 Nuevos Embarques Agregados en este Statement
+              </div>
+              <button class="btn-soft" onclick="switchTab('auditoria'); setAuditSubtab('new_shipments');">
+                Ver todos los nuevos →
+              </button>
+            </div>
+            <div class="table-wrap">
+              <table class="ml-table">
+                <thead>
+                  <tr>
+                    <th>REF / INV NO</th>
+                    <th>Customer</th>
+                    <th>Customer For</th>
+                    <th>Contenedor</th>
+                    <th>Ruta (POL → POD)</th>
+                    <th>ETA</th>
+                    <th>Total Cost</th>
+                    <th>Cargos Extras</th>
+                    <th>Estado</th>
+                  </tr>
+                </thead>
+                <tbody id="dash-new-shipments-tbody"></tbody>
+              </table>
+            </div>
+          </div>
+        </main>
+
+        <!-- Right Column: Asistente de Auditoría & Alertas -->
+        <aside class="right-sidebar">
+          <div class="assistant-card">
+            <div class="assistant-head">
+              <div class="assistant-icon">💡</div>
+              <div>
+                <div class="assistant-title">Asistente de Revisión</div>
+                <div style="font-size:11.5px; color:var(--text-muted);" id="assistant-comp-label">Comparativa semanal</div>
+              </div>
+            </div>
+            <p class="assistant-body" id="assistant-summary-text">
+              Analizando cambios entre el Statement actual, el anterior y tu archivo Concentrado.
+            </p>
+            <div style="display:flex; justify-content:space-between; font-size:12px; font-weight:700; margin-bottom:6px;">
+              <span>Progreso de Revisión</span>
+              <span id="review-progress-label">0 / 0 revisados</span>
+            </div>
+            <div class="progress-bar-wrap">
+              <div class="progress-bar-fill" id="review-progress-bar" style="width: 0%"></div>
+            </div>
+            <button class="btn-gold" style="width:100%; justify-content:center; margin-bottom:8px;" onclick="markAllChangesReviewed()">
+              ✓ Marcar Cambios como Revisados
+            </button>
+            <button class="btn-soft" style="width:100%; justify-content:center;" onclick="downloadConcentradoFile()">
+              ⬇️ Descargar Concentrado (.xlsx)
+            </button>
+          </div>
+
+          <div class="assistant-card">
+            <div class="card-panel-header" style="margin-bottom:10px;">
+              <span class="assistant-title">Alertas de Cargos & Pagos</span>
+              <span class="tab-pill-count" id="right-alerts-count">0</span>
+            </div>
+            <div class="alert-list" id="right-alerts-list"></div>
+          </div>
+
+          <div class="assistant-card">
+            <div class="card-panel-header" style="margin-bottom:10px;">
+              <span class="assistant-title">Resumen Accounting Summary</span>
+            </div>
+            <div id="right-accounting-kpis" style="display:flex; flex-direction:column; gap:8px; font-size:13px;"></div>
+          </div>
+        </aside>
+      </div>
+
+      <!-- ================= VIEW 2: AUDITORÍA DE DIFERENCIAS ================= -->
+      <div id="view-auditoria" class="workspace-body full-width" style="display:none;">
+        <main>
+          <div class="section-header-row">
+            <div>
+              <h1 class="section-title" id="audit-title">Auditoría Detallada de Diferencias entre Statements</h1>
+              <p class="section-subtitle" id="audit-subtitle">Comparando Statement actual vs anterior</p>
+            </div>
+            <div style="display:flex; gap:10px;">
+              <button class="btn-gold" onclick="markAllChangesReviewed()">
+                ✓ Aprobar / Marcar Todos como Revisados
+              </button>
+            </div>
+          </div>
+
+          <div class="subtab-bar">
+            <button class="subtab-btn active" id="subtab-btn-cost_changes" onclick="setAuditSubtab('cost_changes')">
+              ⚠️ Cargos Extras y Cambios de Costo <span class="tab-pill-count" id="sub-cnt-cost">0</span>
+            </button>
+            <button class="subtab-btn" id="subtab-btn-new_shipments" onclick="setAuditSubtab('new_shipments')">
+              🚢 Nuevos Embarques <span class="tab-pill-count" id="sub-cnt-new">0</span>
+            </button>
+            <button class="subtab-btn" id="subtab-btn-new_payments" onclick="setAuditSubtab('new_payments')">
+              💰 Nuevos Pagos (Accounting) <span class="tab-pill-count" id="sub-cnt-pay">0</span>
+            </button>
+            <button class="subtab-btn" id="subtab-btn-customer_diffs" onclick="setAuditSubtab('customer_diffs')">
+              📊 Variación Acumulada por Cliente
+            </button>
+            <button class="subtab-btn" id="subtab-btn-eta_changes" onclick="setAuditSubtab('eta_changes')">
+              📅 Cambios de ETA / Contenedor <span class="tab-pill-count" id="sub-cnt-eta">0</span>
+            </button>
+            <button class="subtab-btn" id="subtab-btn-removed_shipments" onclick="setAuditSubtab('removed_shipments')">
+              🗑️ Referencias Eliminadas <span class="tab-pill-count" id="sub-cnt-rem">0</span>
+            </button>
+          </div>
+
+          <div class="card-panel">
+            <div id="audit-subtab-container"></div>
+          </div>
+        </main>
+      </div>
+
+      <!-- ================= VIEW 3: MASTER LIST COMPLETA ================= -->
+      <div id="view-master" class="workspace-body full-width" style="display:none;">
+        <main>
+          <div class="section-header-row">
+            <div>
+              <h1 class="section-title" id="master-title">Hoja Master List — Referencias y Desglose de Cargos</h1>
+              <p class="section-subtitle">Desliza horizontal o verticalmente en la tabla. Haz clic en cualquier REF/INV NO para ver su evolución en los 21 Statements.</p>
+            </div>
+          </div>
+
+          <div class="card-panel">
+            <div class="filter-bar">
+              <input
+                type="text"
+                id="master-search"
+                class="search-input"
+                placeholder="Buscar por REF/INV NO (ej. MLO-AB26193, ZUT-26006), Cliente, Contenedor o Puerto..."
+                oninput="debounceLoadMaster()"
+              />
+              <select id="master-customer-filter" class="stmt-select" onchange="loadMasterList()">
+                <option value="">Todos los Clientes (CUSTOMER FOR)</option>
+              </select>
+              <label style="display:flex; align-items:center; gap:6px; font-size:12.5px; font-weight:600; cursor:pointer; background:var(--bg-subtle); padding:7px 12px; border-radius:10px; border:1px solid var(--border-warm);">
+                <input type="checkbox" id="master-extra-only" onchange="loadMasterList()" />
+                Solo con Cargos Extras (Amend / EXW / Inland / Previo / Seg)
+              </label>
+            </div>
+
+            <div class="table-wrap">
+              <table class="ml-table">
+                <thead>
+                  <tr>
+                    <th>#</th>
+                    <th>REF / INV NO</th>
+                    <th>Customer</th>
+                    <th>Customer For</th>
+                    <th>Container</th>
+                    <th>Naviera / Ruta</th>
+                    <th>ETD / ETA</th>
+                    <th>Sea Freight</th>
+                    <th>FOB</th>
+                    <th>Amend</th>
+                    <th>EXW</th>
+                    <th>Inland</th>
+                    <th>Total Cost</th>
+                    <th>Previo</th>
+                    <th>Seg.</th>
+                    <th>Bill Amt / Notas</th>
+                  </tr>
+                </thead>
+                <tbody id="master-table-tbody"></tbody>
+              </table>
+            </div>
+          </div>
+        </main>
+      </div>
+
+      <!-- ================= VIEW 4: ACCOUNTING SUMMARY ================= -->
+      <div id="view-accounting" class="workspace-body full-width" style="display:none;">
+        <main>
+          <div class="section-header-row">
+            <div>
+              <h1 class="section-title">Hoja ACCOUNTING SUMMARY — Pagos y Saldos por Cliente</h1>
+              <p class="section-subtitle">Desglose oficial de pagos recibidos en México, pagos en China y costo acumulado por cliente en el Statement seleccionado.</p>
+            </div>
+          </div>
+
+          <div class="kpi-row" id="acc-top-kpis"></div>
+
+          <div class="split-grid-2">
+            <div class="card-panel">
+              <div class="card-panel-header">
+                <div class="card-panel-title">💵 Pagos Recibidos (México y China)</div>
+                <div style="display:flex; gap:8px; flex-wrap:wrap;">
+                  <input type="text" id="acc-pay-search" class="search-input" style="min-width:190px; padding:6px 10px;" placeholder="Filtrar por Razón Social o Cliente..." oninput="renderAccountingTables()" />
+                  <select id="acc-pay-section" class="stmt-select" onchange="renderAccountingTables()">
+                    <option value="ALL">México + China</option>
+                    <option value="MEXICO">Pagos México</option>
+                    <option value="CHINA">Pagos China</option>
+                  </select>
+                </div>
+              </div>
+              <div class="table-wrap">
+                <table class="ml-table">
+                  <thead>
+                    <tr>
+                      <th>Origen</th>
+                      <th>Fecha</th>
+                      <th>Monto</th>
+                      <th>Pagado Por (Razón Social)</th>
+                      <th>Paid To</th>
+                      <th>Cliente / Ref (REMARK)</th>
+                    </tr>
+                  </thead>
+                  <tbody id="acc-payments-tbody"></tbody>
+                </table>
+              </div>
+            </div>
+
+            <div class="card-panel">
+              <div class="card-panel-header">
+                <div class="card-panel-title">📋 Cost for Each Customer (Resumen Eliezer)</div>
+              </div>
+              <div class="table-wrap">
+                <table class="ml-table">
+                  <thead>
+                    <tr>
+                      <th>Customer Name</th>
+                      <th>Costo Acumulado</th>
+                      <th>Variación vs Anterior</th>
+                    </tr>
+                  </thead>
+                  <tbody id="acc-cust-costs-tbody"></tbody>
+                </table>
+              </div>
+            </div>
+          </div>
+        </main>
+      </div>
+
+      <!-- ================= VIEW 5: CONCENTRADO ML 2026 VS STATEMENT ================= -->
+      <div id="view-clientes" class="workspace-body full-width" style="display:none;">
+        <main>
+          <div class="section-header-row">
+            <div>
+              <h1 class="section-title">Auditoría y Sincronización: Statement vs Concentrado ML Logistics 2026</h1>
+              <p class="section-subtitle">
+                Reglas activas de negocio: <strong>Tren (Rail)</strong> comercial en $1,700 / $1,850 no se marca como error de monto · <strong>Previo</strong> evaluado en <strong>$180</strong> ($200 en JAZ) + <strong>Seguro $100</strong> (sumados o separados según la pestaña).
+              </p>
+            </div>
+            <div style="display:flex; gap:10px; flex-wrap:wrap;">
+              <button class="btn-soft" onclick="loadConcentradoOverview()">
+                🔄 Re-analizar Concentrado
+              </button>
+              <button class="btn-gold" onclick="downloadConcentradoFile()">
+                ⬇️ Descargar Concentrado (.xlsx)
+              </button>
+            </div>
+          </div>
+
+          <div class="kpi-row" id="conc-top-kpis"></div>
+
+          <div class="subtab-bar">
+            <button class="subtab-btn active" id="conc-subtab-btn-diffs" onclick="setConcSubtab('diffs')">
+              ⚠️ Diferencias Statement vs Concentrado <span class="tab-pill-count" id="conc-cnt-diffs">0</span>
+            </button>
+            <button class="subtab-btn" id="conc-subtab-btn-missing" onclick="setConcSubtab('missing')">
+              ➕ Referencias Nuevas por Insertar <span class="tab-pill-count" id="conc-cnt-missing">0</span>
+            </button>
+            <button class="subtab-btn" id="conc-subtab-btn-sheets" onclick="setConcSubtab('sheets')">
+              🗂️ Distribución de Hojas y Mapeo (49 Clientes)
+            </button>
+            <button class="subtab-btn" id="conc-subtab-btn-razones" onclick="setConcSubtab('razones')">
+              🔗 Cuenta General & Razones Sociales
+            </button>
+          </div>
+
+          <div class="card-panel" id="conc-subtab-container"></div>
+        </main>
+      </div>
+    </div>
+  </div>
+
+  <!-- Modal: Historial Semanal de una Referencia -->
+  <div class="modal-backdrop" id="ref-history-modal" onclick="closeRefModal(event)">
+    <div class="modal-dialog" onclick="event.stopPropagation()">
+      <div class="modal-header">
+        <div>
+          <h3 style="font-size:17px; font-weight:800;" id="modal-ref-title">Historial de Referencia</h3>
+          <p style="font-size:12.5px; color:var(--text-secondary);" id="modal-ref-subtitle">Evolución semana a semana en los Statements cargados</p>
+        </div>
+        <button class="btn-soft" onclick="closeRefModal()">✕ Cerrar</button>
+      </div>
+      <div class="modal-body" id="modal-ref-body"></div>
+    </div>
+  </div>
+
+  <div class="toast-box" id="toast-box"></div>
+
+  <script src="app.js?v=5" onerror="var s=document.createElement('script');s.src='/static/app.js?v=5';document.body.appendChild(s);"></script>
+</body>
+</html>

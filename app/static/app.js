@@ -8,7 +8,32 @@ let state = {
   activeTab: 'dashboard',
   auditSubtab: 'cost_changes',
   concSubtab: 'diffs',
+  isStaticMode: false,
+  staticDetailsCache: {},
+  staticDiffsCache: {},
+  staticConcCache: {},
+  staticRefHistory: null,
+  localReviews: JSON.parse(localStorage.getItem('ml_reviews_v1') || '{}'),
 };
+
+async function fetchJsonSafe(url) {
+  try {
+    const res = await fetch(url);
+    if (!res.ok) return null;
+    const ct = res.headers.get('content-type') || '';
+    if (!ct.includes('json') && !url.endsWith('.json')) return null;
+    return await res.json();
+  } catch (e) {
+    return null;
+  }
+}
+
+async function fetchStaticData(relPath) {
+  let d = await fetchJsonSafe(`data/${relPath}`);
+  if (!d) d = await fetchJsonSafe(`/static/data/${relPath}`);
+  if (!d) d = await fetchJsonSafe(`app/static/data/${relPath}`);
+  return d;
+}
 
 let masterDebounceTimer = null;
 
@@ -92,9 +117,23 @@ async function initApp() {
 }
 
 async function loadStatementsList(preferredRawDate = null) {
-  const res = await fetch('/api/statements');
-  const data = await res.json();
-  state.statements = data.statements || [];
+  let data = await fetchJsonSafe('/api/statements');
+  if (!data) {
+    state.isStaticMode = true;
+    data = await fetchStaticData('statements.json');
+    const customList = JSON.parse(localStorage.getItem('ml_custom_stmts_v1') || '[]');
+    if (data && customList.length) {
+      const existing = new Set((data.statements || []).map(s => s.raw_date));
+      customList.forEach(cs => {
+        if (!existing.has(cs.raw_date)) data.statements.unshift(cs);
+      });
+      data.statements.sort((a, b) => b.raw_date.localeCompare(a.raw_date));
+    }
+  } else {
+    state.isStaticMode = false;
+  }
+
+  state.statements = (data && data.statements) ? data.statements : [];
 
   document.getElementById('dash-sync-badge').textContent = `${state.statements.length} Statements Sincronizados`;
 
@@ -169,19 +208,243 @@ async function onCompareChange() {
   await refreshActiveStatementData();
 }
 
+async function getStaticDetail(rawDate) {
+  if (state.staticDetailsCache[rawDate]) return state.staticDetailsCache[rawDate];
+  const customDetail = localStorage.getItem(`ml_custom_detail_${rawDate}`);
+  if (customDetail) {
+    const parsed = JSON.parse(customDetail);
+    state.staticDetailsCache[rawDate] = parsed;
+    return parsed;
+  }
+  const d = await fetchStaticData(`detail/${rawDate}.json`);
+  if (d) state.staticDetailsCache[rawDate] = d;
+  return d;
+}
+
+function applyLocalReviewsToDiff(diff) {
+  if (!diff) return diff;
+  const rev = state.localReviews || {};
+  let reviewedCount = 0;
+  let pendingCount = 0;
+  (diff.cost_changes || []).forEach(c => {
+    if (rev[c.change_key]) c.review_status = rev[c.change_key];
+    if (c.review_status === 'reviewed') reviewedCount++;
+    else pendingCount++;
+  });
+  (diff.new_shipments || []).forEach(n => {
+    if (rev[n.change_key]) n.review_status = rev[n.change_key];
+    if (n.review_status === 'reviewed') reviewedCount++;
+    else pendingCount++;
+  });
+  (diff.new_payments || []).forEach(p => {
+    if (rev[p.change_key]) p.review_status = rev[p.change_key];
+    if (p.review_status === 'reviewed') reviewedCount++;
+    else pendingCount++;
+  });
+  if (diff.summary) {
+    diff.summary.reviewed_count = reviewedCount;
+    diff.summary.pending_review_count = pendingCount;
+  }
+  return diff;
+}
+
+async function computeClientSideDiff(currRawDate, compRawDate) {
+  const currDetail = await getStaticDetail(currRawDate);
+  const compDetail = compRawDate ? await getStaticDetail(compRawDate) : null;
+  if (!currDetail) return null;
+
+  const currStmt = currDetail.statement;
+  const prevStmt = compDetail ? compDetail.statement : null;
+
+  if (!prevStmt) {
+    return applyLocalReviewsToDiff({
+      raw_date: currRawDate,
+      stmt_date: currStmt.stmt_date,
+      compare_to: null,
+      compare_to_date: null,
+      current_statement: currStmt,
+      previous_statement: null,
+      summary: {
+        new_shipments_count: currDetail.master_items.length,
+        removed_shipments_count: 0,
+        cost_changes_count: 0,
+        eta_changes_count: 0,
+        new_payments_count: currDetail.payments.length,
+        net_extra_charges_delta: 0,
+        new_shipments_total_cost: currStmt.total_cost_master,
+        new_payments_total_amt: currStmt.acc_total_rcvd,
+        pending_review_count: 0,
+        reviewed_count: 0,
+      },
+      cost_changes: [],
+      new_shipments: currDetail.master_items.map(m => ({ ...m, change_key: `NEW:${currRawDate}:${m.ref_key}`, review_status: 'pending' })),
+      removed_shipments: [],
+      eta_changes: [],
+      new_payments: currDetail.payments.map(p => ({ ...p, change_key: `PAY:${currRawDate}:${p.payment_sig}`, review_status: 'pending' })),
+      customer_cost_diffs: currDetail.customer_costs.map(c => ({ ...c, prev_cost: 0, delta: c.cost })),
+    });
+  }
+
+  const prevByRef = {};
+  compDetail.master_items.forEach(m => { prevByRef[m.ref_no] = m; });
+  const currByRef = {};
+  currDetail.master_items.forEach(m => { currByRef[m.ref_no] = m; });
+
+  const newShipments = [];
+  const costChanges = [];
+  const etaChanges = [];
+  let netExtraDelta = 0;
+
+  const fields = [
+    ['sea_freight', 'Sea Freight'],
+    ['fob_cost', 'FOB Cost'],
+    ['amend_fee', 'Amend Fee'],
+    ['exw_fee', 'EXW Fee'],
+    ['inland_fee', 'Inland Fee'],
+    ['total_cost', 'Total Cost'],
+    ['previo', 'Previo'],
+    ['insurance', 'Insurance'],
+  ];
+
+  currDetail.master_items.forEach(m => {
+    const p = prevByRef[m.ref_no];
+    if (!p) {
+      newShipments.push({ ...m, change_key: `NEW:${currRawDate}:${m.ref_key}`, review_status: 'pending' });
+      return;
+    }
+    const fDiffs = [];
+    fields.forEach(([k, label]) => {
+      const vNew = Number(m[k] || 0);
+      const vOld = Number(p[k] || 0);
+      if (Math.abs(vNew - vOld) >= 0.01) {
+        fDiffs.push({ field: k, label, old: vOld, new: vNew, delta: Number((vNew - vOld).toFixed(2)) });
+      }
+    });
+    if (fDiffs.length > 0) {
+      const dTotal = Number(((m.total_cost || 0) - (p.total_cost || 0)).toFixed(2));
+      const dPrev = Number(((m.previo || 0) - (p.previo || 0)).toFixed(2));
+      const dIns = Number(((m.insurance || 0) - (p.insurance || 0)).toFixed(2));
+      const comb = Number((dTotal + dPrev + dIns).toFixed(2));
+      netExtraDelta += comb;
+      costChanges.push({
+        change_key: `COST:${currRawDate}:${m.ref_key}`,
+        ref_no: m.ref_no,
+        customer: m.customer,
+        customer_for: m.customer_for,
+        container: m.container,
+        shipping_line: m.shipping_line,
+        pol: m.pol,
+        pod: m.pod,
+        eta: m.update_eta || m.eta,
+        old_total_cost: p.total_cost,
+        new_total_cost: m.total_cost,
+        delta_total_cost: dTotal,
+        combined_delta: comb,
+        field_diffs: fDiffs,
+        current_item: m,
+        previous_item: p,
+        review_status: 'pending',
+      });
+    }
+    if ((m.eta || '') !== (p.eta || '') || (m.update_eta || '') !== (p.update_eta || '')) {
+      etaChanges.push({
+        ref_no: m.ref_no,
+        customer: m.customer,
+        customer_for: m.customer_for,
+        container: m.container,
+        old_eta: p.eta,
+        new_eta: m.eta,
+        old_update_eta: p.update_eta,
+        new_update_eta: m.update_eta,
+      });
+    }
+  });
+
+  const removedShipments = compDetail.master_items.filter(p => !currByRef[p.ref_no]);
+  const prevPayCount = {};
+  compDetail.payments.forEach(p => { prevPayCount[p.payment_sig] = (prevPayCount[p.payment_sig] || 0) + 1; });
+  const newPayments = [];
+  currDetail.payments.forEach(p => {
+    if ((prevPayCount[p.payment_sig] || 0) > 0) {
+      prevPayCount[p.payment_sig]--;
+    } else {
+      newPayments.push({ ...p, change_key: `PAY:${currRawDate}:${p.payment_sig}`, review_status: 'pending' });
+    }
+  });
+
+  const prevCustMap = {};
+  compDetail.customer_costs.forEach(c => { prevCustMap[c.customer_name] = c.cost; });
+  const custDiffs = currDetail.customer_costs.map(c => ({
+    customer_name: c.customer_name,
+    prev_cost: prevCustMap[c.customer_name] || 0,
+    cost: c.cost,
+    delta: Number((c.cost - (prevCustMap[c.customer_name] || 0)).toFixed(2)),
+    remark: c.remark,
+  }));
+
+  return applyLocalReviewsToDiff({
+    raw_date: currRawDate,
+    stmt_date: currStmt.stmt_date,
+    compare_to: compRawDate,
+    compare_to_date: prevStmt.stmt_date,
+    current_statement: currStmt,
+    previous_statement: prevStmt,
+    summary: {
+      new_shipments_count: newShipments.length,
+      removed_shipments_count: removedShipments.length,
+      cost_changes_count: costChanges.length,
+      eta_changes_count: etaChanges.length,
+      new_payments_count: newPayments.length,
+      net_extra_charges_delta: Number(netExtraDelta.toFixed(2)),
+      new_shipments_total_cost: Number(newShipments.reduce((a, b) => a + (b.total_cost || 0), 0).toFixed(2)),
+      new_payments_total_amt: Number(newPayments.reduce((a, b) => a + (b.rcvd_amt || 0), 0).toFixed(2)),
+      pending_review_count: 0,
+      reviewed_count: 0,
+    },
+    cost_changes: costChanges,
+    new_shipments: newShipments,
+    removed_shipments: removedShipments,
+    eta_changes: etaChanges,
+    new_payments: newPayments,
+    customer_cost_diffs: custDiffs,
+  });
+}
+
 async function refreshActiveStatementData() {
   if (!state.activeRawDate) return;
 
-  const qComp = state.compareRawDate ? `?compare_to=${encodeURIComponent(state.compareRawDate)}` : '';
-  const [diffRes, detailRes, concRes] = await Promise.all([
-    fetch(`/api/statements/${state.activeRawDate}/diff${qComp}`),
-    fetch(`/api/statements/${state.activeRawDate}`),
-    fetch(`/api/concentrado/overview?raw_date=${encodeURIComponent(state.activeRawDate)}`),
-  ]);
+  if (!state.isStaticMode) {
+    const qComp = state.compareRawDate ? `?compare_to=${encodeURIComponent(state.compareRawDate)}` : '';
+    const [diffRes, detailRes, concRes] = await Promise.all([
+      fetch(`/api/statements/${state.activeRawDate}/diff${qComp}`),
+      fetch(`/api/statements/${state.activeRawDate}`),
+      fetch(`/api/concentrado/overview?raw_date=${encodeURIComponent(state.activeRawDate)}`),
+    ]);
+    state.currentDiff = await diffRes.json();
+    state.currentDetail = await detailRes.json();
+    state.concentrado = await concRes.json();
+  } else {
+    state.currentDetail = await getStaticDetail(state.activeRawDate);
+    const activeObj = state.statements.find(s => s.raw_date === state.activeRawDate);
+    const isDefaultComp = !state.compareRawDate || (activeObj && state.compareRawDate === activeObj.prev_raw_date);
 
-  state.currentDiff = await diffRes.json();
-  state.currentDetail = await detailRes.json();
-  state.concentrado = await concRes.json();
+    let diffData = null;
+    if (isDefaultComp) {
+      diffData = await fetchStaticData(`diff/${state.activeRawDate}.json`);
+    }
+    if (!diffData) {
+      diffData = await computeClientSideDiff(state.activeRawDate, state.compareRawDate);
+    } else {
+      diffData = applyLocalReviewsToDiff(diffData);
+    }
+    state.currentDiff = diffData;
+
+    let concData = await fetchStaticData(`concentrado/${state.activeRawDate}.json`);
+    if (!concData) {
+      concData = await fetchStaticData(`concentrado/${state.statements[0].raw_date}.json`);
+    }
+    state.concentrado = concData;
+  }
 
   populateMasterCustomerDropdown();
   renderDashboard();
@@ -721,18 +984,34 @@ function debounceLoadMaster() {
 
 async function loadMasterList() {
   if (!state.activeRawDate) return;
-  const search = document.getElementById('master-search').value.trim();
+  const search = document.getElementById('master-search').value.trim().toLowerCase();
   const cust = document.getElementById('master-customer-filter').value;
   const extraOnly = document.getElementById('master-extra-only').checked;
 
-  const params = new URLSearchParams();
-  if (search) params.set('search', search);
-  if (cust) params.set('customer_for', cust);
-  if (extraOnly) params.set('only_extra_charges', 'true');
+  if (!state.isStaticMode) {
+    const params = new URLSearchParams();
+    if (search) params.set('search', search);
+    if (cust) params.set('customer_for', cust);
+    if (extraOnly) params.set('only_extra_charges', 'true');
 
-  const res = await fetch(`/api/statements/${state.activeRawDate}?${params.toString()}`);
-  const data = await res.json();
-  renderMasterTable(data.master_items || []);
+    const res = await fetch(`/api/statements/${state.activeRawDate}?${params.toString()}`);
+    const data = await res.json();
+    renderMasterTable(data.master_items || []);
+  } else {
+    const allItems = state.currentDetail?.master_items || [];
+    const filtered = allItems.filter(item => {
+      if (cust && item.customer_for !== cust) return false;
+      if (extraOnly && !((item.amend_fee > 0) || (item.exw_fee > 0) || (item.inland_fee > 0) || (item.previo > 0) || (item.insurance > 0))) {
+        return false;
+      }
+      if (search) {
+        const hay = `${item.ref_no} ${item.customer} ${item.customer_for} ${item.container} ${item.shipping_line} ${item.pol} ${item.pod}`.toLowerCase();
+        if (!hay.includes(search)) return false;
+      }
+      return true;
+    });
+    renderMasterTable(filtered);
+  }
 }
 
 function renderMasterTable(items) {
@@ -855,8 +1134,14 @@ function renderAccountingTables() {
 // ================= VIEW 5: CONCENTRADO ML 2026 VS STATEMENT =================
 async function loadConcentradoOverview() {
   if (!state.activeRawDate) return;
-  const res = await fetch(`/api/concentrado/overview?raw_date=${encodeURIComponent(state.activeRawDate)}`);
-  state.concentrado = await res.json();
+  if (!state.isStaticMode) {
+    const res = await fetch(`/api/concentrado/overview?raw_date=${encodeURIComponent(state.activeRawDate)}`);
+    state.concentrado = await res.json();
+  } else {
+    let concData = await fetchStaticData(`concentrado/${state.activeRawDate}.json`);
+    if (!concData) concData = await fetchStaticData(`concentrado/${state.statements[0].raw_date}.json`);
+    state.concentrado = concData;
+  }
   renderConcentradoView();
   renderDashboard();
 }
@@ -1179,40 +1464,72 @@ async function insertAllMissingToConcentrado() {
 }
 
 async function sendConcentradoActions(actions, successMsg) {
-  showToast('⏳ Actualizando CONCENTRADO ML LOGISTICS ELIEZER 2026.xlsx...');
-  const res = await fetch('/api/concentrado/apply-fixes', {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ actions }),
-  });
-  const data = await res.json();
-  if (!res.ok) {
-    alert(data.detail || 'Error al actualizar el archivo Concentrado');
-    return;
+  if (!state.isStaticMode) {
+    showToast('⏳ Actualizando CONCENTRADO ML LOGISTICS ELIEZER 2026.xlsx...');
+    const res = await fetch('/api/concentrado/apply-fixes', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ actions }),
+    });
+    const data = await res.json();
+    if (!res.ok) {
+      alert(data.detail || 'Error al actualizar el archivo Concentrado');
+      return;
+    }
+    showToast(successMsg);
+    await loadConcentradoOverview();
+  } else {
+    // In Static Web App mode, update the in-memory discrepancies list and mark applied
+    const fixedRefs = new Set(actions.map(a => `${a.sheet}:${a.ref_no}`));
+    if (state.concentrado) {
+      state.concentrado.discrepancies = (state.concentrado.discrepancies || []).filter(
+        d => !fixedRefs.has(`${d.sheet}:${d.ref_no}`)
+      );
+      state.concentrado.missing_in_concentrado = (state.concentrado.missing_in_concentrado || []).filter(
+        m => !fixedRefs.has(`${m.target_sheet}:${m.ref_no}`)
+      );
+      state.concentrado.summary.high_discrepancies_count = state.concentrado.discrepancies.filter(d => d.severity === 'high').length;
+      state.concentrado.summary.missing_refs_count = state.concentrado.missing_in_concentrado.length;
+    }
+    showToast(`${successMsg} (Usa "Descargar Concentrado" para bajar el Excel)`);
+    renderConcentradoView();
+    renderDashboard();
   }
-  showToast(successMsg);
-  await loadConcentradoOverview();
 }
 
 function downloadConcentradoFile() {
-  window.location.href = '/api/concentrado/download';
+  if (!state.isStaticMode) {
+    window.location.href = '/api/concentrado/download';
+  } else {
+    const a = document.createElement('a');
+    a.href = 'data/CONCENTRADO ML LOGISTICS ELIEZER 2026.xlsx';
+    a.download = 'CONCENTRADO ML LOGISTICS ELIEZER 2026.xlsx';
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+  }
   showToast('⬇️ Descargando CONCENTRADO ML LOGISTICS ELIEZER 2026.xlsx...');
 }
 
 // ================= REVIEW / APPROVAL ACTIONS =================
 async function toggleReviewItem(changeKey, changeType, refNo, newStatus) {
-  await fetch('/api/reviews/toggle', {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({
-      change_key: changeKey,
-      raw_date: state.activeRawDate,
-      change_type: changeType,
-      ref_no: refNo,
-      status: newStatus,
-      note: '',
-    }),
-  });
+  if (!state.isStaticMode) {
+    await fetch('/api/reviews/toggle', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        change_key: changeKey,
+        raw_date: state.activeRawDate,
+        change_type: changeType,
+        ref_no: refNo,
+        status: newStatus,
+        note: '',
+      }),
+    });
+  } else {
+    state.localReviews[changeKey] = newStatus;
+    localStorage.setItem('ml_reviews_v1', JSON.stringify(state.localReviews));
+  }
   showToast(newStatus === 'reviewed' ? `✓ ${refNo} marcado como Revisado` : `↩ ${refNo} marcado como Pendiente`);
   await refreshActiveStatementData();
 }
@@ -1235,11 +1552,16 @@ async function markAllChangesReviewed() {
     return;
   }
 
-  await fetch('/api/reviews/bulk', {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ items }),
-  });
+  if (!state.isStaticMode) {
+    await fetch('/api/reviews/bulk', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ items }),
+    });
+  } else {
+    items.forEach(it => { state.localReviews[it.change_key] = 'reviewed'; });
+    localStorage.setItem('ml_reviews_v1', JSON.stringify(state.localReviews));
+  }
   showToast(`✅ Se marcaron ${items.length} cambios del Statement ${state.currentDiff.stmt_date} como Revisados`);
   await refreshActiveStatementData();
 }
@@ -1252,9 +1574,17 @@ async function openRefHistory(refNo) {
   body.innerHTML = `<p style="padding:16px;">Consultando los 21 Statements para <strong>${esc(refNo)}</strong>...</p>`;
   modal.classList.add('open');
 
-  const res = await fetch(`/api/references/${encodeURIComponent(refNo)}/history`);
-  const data = await res.json();
-  const hist = data.history || [];
+  let hist = [];
+  if (!state.isStaticMode) {
+    const res = await fetch(`/api/references/${encodeURIComponent(refNo)}/history`);
+    const data = await res.json();
+    hist = data.history || [];
+  } else {
+    if (!state.staticRefHistory) {
+      state.staticRefHistory = (await fetchStaticData('ref_history.json')) || {};
+    }
+    hist = state.staticRefHistory[refNo] || [];
+  }
 
   if (!hist.length) {
     body.innerHTML = `<p style="padding:16px;">No se encontró historial para ${esc(refNo)}.</p>`;
@@ -1372,42 +1702,227 @@ function setupDragAndDrop() {
   });
 }
 
+function parseExcelStatementClientSide(file, rawDate) {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = e => {
+      try {
+        const wb = XLSX.read(new Uint8Array(e.target.result), { type: 'array', cellDates: true });
+        const fmtD = v => {
+          if (!v) return '';
+          if (v instanceof Date && !isNaN(v)) return v.toISOString().slice(0, 10);
+          return String(v).trim();
+        };
+        const num = v => {
+          if (v === null || v === undefined || v === '' || v === '-') return 0;
+          if (typeof v === 'number') return isFinite(v) ? v : 0;
+          const n = parseFloat(String(v).replace(/[$,\s]/g, ''));
+          return isNaN(n) ? 0 : n;
+        };
+
+        const mlSheetName = wb.SheetNames.find(s => s.toLowerCase().includes('master')) || wb.SheetNames[1];
+        const mlRows = XLSX.utils.sheet_to_json(wb.Sheets[mlSheetName], { header: 1, defval: null });
+        const masterItems = [];
+        const seenRefs = {};
+        let totalCostMaster = 0, totalPrevio = 0, totalIns = 0;
+
+        for (let i = 1; i < mlRows.length; i++) {
+          const r = mlRows[i];
+          if (!r || !r[0] || String(r[0]).trim().toUpperCase().startsWith('REF')) continue;
+          const refNo = String(r[0]).trim();
+          seenRefs[refNo] = (seenRefs[refNo] || 0) + 1;
+          const refKey = seenRefs[refNo] === 1 ? refNo : `${refNo}__ROW${i + 1}`;
+          const item = {
+            raw_date: rawDate,
+            row_num: i + 1,
+            ref_key: refKey,
+            ref_no: refNo,
+            customer: String(r[1] || '').trim(),
+            customer_for: String(r[2] || '').trim(),
+            container: String(r[3] || '').trim(),
+            etd: fmtD(r[4]),
+            eta: fmtD(r[5]),
+            update_eta: fmtD(r[6]),
+            shipping_line: String(r[7] || '').trim(),
+            pol: String(r[8] || '').trim(),
+            pod: String(r[9] || '').trim(),
+            sea_freight: num(r[10]),
+            fob_cost: num(r[11]),
+            amend_fee: num(r[12]),
+            exw_fee: num(r[13]),
+            inland_fee: num(r[14]),
+            total_cost: num(r[15]),
+            previo: num(r[16]),
+            insurance: num(r[17]),
+            bill_amt: typeof r[18] === 'number' ? r[18] : null,
+            bill_amt_text: typeof r[18] === 'number' ? '' : String(r[18] || '').trim(),
+            remark: String(r[19] || '').trim(),
+          };
+          totalCostMaster += item.total_cost;
+          totalPrevio += item.previo;
+          totalIns += item.insurance;
+          masterItems.push(item);
+        }
+
+        const accSheetName = wb.SheetNames.find(s => s.toUpperCase().includes('ACCOUNTING')) || wb.SheetNames[0];
+        const accRows = XLSX.utils.sheet_to_json(wb.Sheets[accSheetName], { header: 1, defval: null });
+        const accBalance = num(accRows[0]?.[1]);
+        const accPending = num(accRows[1]?.[1]);
+        const accPendingNote = String(accRows[1]?.[2] || '').trim();
+        const accTotalRcvd = num(accRows[2]?.[1]);
+        const accTotalCost = num(accRows[2]?.[3]);
+        const accPaidMexico = num(accRows[3]?.[1]);
+        let accPaidChina = 0;
+        const payments = [];
+        const custCosts = [];
+        let section = 'MEXICO';
+
+        for (let i = 5; i < accRows.length; i++) {
+          const r = accRows[i];
+          if (!r) continue;
+          const c0 = String(r[0] || '').trim();
+          if (c0.toUpperCase().includes('PAID IN CHINA')) {
+            section = 'CHINA';
+            accPaidChina = num(r[1]);
+            continue;
+          }
+          if (c0.toUpperCase().includes('RCVD')) continue;
+          const amt = num(r[1]);
+          if (c0 && amt > 0) {
+            const pDate = fmtD(r[0]);
+            const pFrom = String(r[2] || '').trim();
+            const pTo = String(r[3] || '').trim();
+            const rem = String(r[4] || '').trim();
+            payments.push({
+              raw_date: rawDate,
+              row_num: i + 1,
+              section,
+              rcvd_date: pDate,
+              rcvd_amt: amt,
+              paid_from: pFrom,
+              paid_to: pTo,
+              remark: rem,
+              payment_sig: `${section}|${pDate}|${amt.toFixed(2)}|${pFrom.toUpperCase()}|${rem.toUpperCase()}`,
+            });
+          }
+          if (section === 'MEXICO' && r[6] && num(r[7]) > 0) {
+            custCosts.push({
+              raw_date: rawDate,
+              customer_name: String(r[6]).trim(),
+              cost: num(r[7]),
+              remark: String(r[8] || '').trim(),
+            });
+          }
+        }
+
+        const stmtDate = `${rawDate.slice(0, 4)}-${rawDate.slice(4, 6)}-${rawDate.slice(6, 8)}`;
+        const prevStmt = state.statements[0];
+        const stmtSummary = {
+          raw_date: rawDate,
+          stmt_date: stmtDate,
+          filename: file.name,
+          total_containers: masterItems.length,
+          total_cost_master: Number(totalCostMaster.toFixed(2)),
+          total_previo: Number(totalPrevio.toFixed(2)),
+          total_insurance: Number(totalIns.toFixed(2)),
+          acc_balance: accBalance,
+          acc_pending_receive: accPending,
+          acc_pending_note: accPendingNote,
+          acc_total_rcvd: accTotalRcvd,
+          acc_total_cost: accTotalCost,
+          acc_paid_mexico: accPaidMexico,
+          acc_paid_china: accPaidChina,
+          prev_raw_date: prevStmt ? prevStmt.raw_date : null,
+          delta_containers: prevStmt ? masterItems.length - prevStmt.total_containers : 0,
+          delta_cost: prevStmt ? Number((totalCostMaster - prevStmt.total_cost_master).toFixed(2)) : 0,
+          delta_balance: prevStmt ? Number((accBalance - prevStmt.acc_balance).toFixed(2)) : 0,
+        };
+
+        const cforSet = Array.from(new Set(masterItems.map(m => m.customer_for).filter(Boolean))).sort();
+        resolve({
+          stmtSummary,
+          detailPayload: {
+            statement: stmtSummary,
+            master_items: masterItems,
+            payments,
+            customer_costs: custCosts,
+            customers_for: cforSet,
+          },
+        });
+      } catch (err) {
+        reject(err);
+      }
+    };
+    reader.onerror = reject;
+    reader.readAsArrayBuffer(file);
+  });
+}
+
 async function uploadStatementFile(file) {
   let customDate = null;
-  if (!/(202\d{5})/.test(file.name)) {
+  const mDate = file.name.match(/(202\d{5})/);
+  if (!mDate) {
     customDate = prompt(
       `El archivo "${file.name}" no incluye la fecha en el nombre. Ingresa la fecha del Statement en formato AAAAMMDD (ejemplo: 20261021):`,
       new Date().toISOString().slice(0, 10).replace(/-/g, '')
     );
     if (!customDate) return;
   }
+  const rawDate = mDate ? mDate[1] : customDate.replace(/\D/g, '').slice(0, 8);
 
-  showToast(`⏳ Procesando y guardando "${file.name}"...`);
-  const formData = new FormData();
-  formData.append('file', file);
-  if (customDate) formData.append('custom_date', customDate);
+  showToast(`⏳ Procesando "${file.name}"...`);
 
-  const res = await fetch('/api/statements/upload', {
-    method: 'POST',
-    body: formData,
-  });
+  if (!state.isStaticMode) {
+    const formData = new FormData();
+    formData.append('file', file);
+    if (customDate) formData.append('custom_date', customDate);
 
-  const data = await res.json();
-  if (!res.ok) {
-    alert(data.detail || 'Error al cargar el archivo');
-    return;
+    const res = await fetch('/api/statements/upload', {
+      method: 'POST',
+      body: formData,
+    });
+
+    const data = await res.json();
+    if (!res.ok) {
+      alert(data.detail || 'Error al cargar el archivo');
+      return;
+    }
+
+    showToast(`✅ Statement ${data.raw_date} cargado y auditado con éxito`);
+    await loadStatementsList(data.raw_date);
+  } else {
+    try {
+      const { stmtSummary, detailPayload } = await parseExcelStatementClientSide(file, rawDate);
+      state.staticDetailsCache[rawDate] = detailPayload;
+      try {
+        localStorage.setItem(`ml_custom_detail_${rawDate}`, JSON.stringify(detailPayload));
+        const customList = JSON.parse(localStorage.getItem('ml_custom_stmts_v1') || '[]').filter(s => s.raw_date !== rawDate);
+        customList.unshift(stmtSummary);
+        localStorage.setItem('ml_custom_stmts_v1', JSON.stringify(customList));
+      } catch (storageErr) {
+        console.warn('Almacenamiento local lleno, manteniendo en sesión:', storageErr);
+      }
+      state.statements = [stmtSummary, ...state.statements.filter(s => s.raw_date !== rawDate)];
+      state.statements.sort((a, b) => b.raw_date.localeCompare(a.raw_date));
+      showToast(`✅ Statement ${rawDate} procesado en navegador con éxito`);
+      await loadStatementsList(rawDate);
+    } catch (err) {
+      alert('Error al leer el archivo Excel: ' + err.message);
+    }
   }
-
-  showToast(`✅ Statement ${data.raw_date} cargado y auditado con éxito`);
-  await loadStatementsList(data.raw_date);
 }
 
 async function syncOneDriveFolder() {
-  showToast('🔄 Sincronizando archivos de la carpeta OneDrive...');
-  const res = await fetch('/api/statements/sync', { method: 'POST' });
-  const data = await res.json();
-  showToast(`✅ Carpeta sincronizada (${data.statements.length} Statements disponibles)`);
-  await loadStatementsList(state.activeRawDate);
+  if (!state.isStaticMode) {
+    showToast('🔄 Sincronizando archivos de la carpeta OneDrive...');
+    const res = await fetch('/api/statements/sync', { method: 'POST' });
+    const data = await res.json();
+    showToast(`✅ Carpeta sincronizada (${data.statements.length} Statements disponibles)`);
+    await loadStatementsList(state.activeRawDate);
+  } else {
+    showToast('✅ Datos sincronizados en la Aplicación Web Estática');
+    await loadStatementsList(state.activeRawDate);
+  }
 }
 
 // ================= TAB NAVIGATION =================

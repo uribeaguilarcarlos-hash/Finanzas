@@ -1,0 +1,16 @@
+{
+  "navigationFallback": {
+    "rewrite": "/index.html",
+    "exclude": ["/static/*", "/data/*", "/*.css", "/*.js", "/*.png", "/*.json", "/*.xlsx"]
+  },
+  "routes": [
+    {
+      "route": "/static/*",
+      "rewrite": "/{*}"
+    }
+  ],
+  "mimeTypes": {
+    ".json": "application/json",
+    ".xlsx": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+  }
+}

@@ -7,14 +7,15 @@
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
   <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&display=swap" rel="stylesheet">
-  <link rel="stylesheet" href="/static/styles.css?v=6" />
+  <script src="https://cdn.jsdelivr.net/npm/xlsx@0.18.5/dist/xlsx.full.min.js"></script>
+  <link rel="stylesheet" href="styles.css?v=7" onerror="this.onerror=null;this.href='/static/styles.css?v=7';" />
 </head>
 <body>
   <div class="app-shell">
     <!-- Left Vertical Icon Rail -->
     <aside class="left-rail">
       <div class="brand-logo-wrap" onclick="switchTab('dashboard')" title="ML Logistics - Estado de Cuenta">
-        <img src="/static/logo.png" alt="ML Logistics Logo" />
+        <img src="logo.png" onerror="this.onerror=null;this.src='/static/logo.png';" alt="ML Logistics Logo" />
       </div>
 
       <nav class="rail-nav">
@@ -645,6 +646,6 @@
 
   <div class="toast-box" id="toast-box"></div>
 
-  <script src="/static/app.js?v=4"></script>
+  <script src="app.js?v=5" onerror="var s=document.createElement('script');s.src='/static/app.js?v=5';document.body.appendChild(s);"></script>
 </body>
 </html>
