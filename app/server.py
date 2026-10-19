@@ -742,6 +742,95 @@ def resolve_target_sheet_for_item(item: Dict[str, Any], cust_to_sheet: Dict, cfo
     return "SALOMON JASQUI"
 
 
+def round_up_50(val: float) -> float:
+    import math
+    if val <= 0:
+        return 0.0
+    return float(math.ceil(val / 50.0) * 50.0)
+
+
+def compute_concentrado_target_values_for_sheet(m: Dict[str, Any], sname: str, hdr: List[str]) -> Dict[str, Any]:
+    """
+    Calcula los valores exactos que corresponden a cada columna de una pestaña específica
+    del Concentrado siguiendo la regla de negocio del usuario:
+      1) Si el Statement trae BILL AMT (>0), ése se convierte en el TOTAL COST del Concentrado
+         (descontando el tren comercial $1,700 si la pestaña tiene columna propia de RAIL y el BILL AMT ya incluía el tren).
+      2) Si el Statement tiene vacío el BILL AMT, se calcula como:
+         RedondearHaciaArribaAlMultiploDe50( CostoBaseSinColumnasSeparadas + $350 ).
+      3) Previo se cobra en $180 ($200 en JAZ) y Seguro en $100; si la hoja tiene una sola columna
+         combinada (ej. PREVIO / INSURANCE o INSURANCE en SALOMON JASQUI), van sumados ($180, $100 o $280).
+    """
+    has_rail_col = any("RAIL" in h for h in hdr)
+    has_exw_col = any("EXW" in h or "OTHER COST" in h for h in hdr)
+    has_amend_col = any("AMEND" in h or "DETENTION" in h for h in hdr)
+    has_sep_prev_ins = (
+        any("PREVIO" in h and "INSURANCE" not in h for h in hdr)
+        and any("INSURANCE" in h and "PREVIO" not in h for h in hdr)
+    )
+
+    stmt_sea = float(m.get("sea_freight") or 0.0)
+    stmt_fob = float(m.get("fob_cost") or 0.0)
+    stmt_inland = float(m.get("inland_fee") or 0.0)
+    stmt_amend = float(m.get("amend_fee") or 0.0)
+    stmt_exw = float(m.get("exw_fee") or 0.0)
+    stmt_total = float(m.get("total_cost") or 0.0)
+    stmt_prev = float(m.get("previo") or 0.0)
+    stmt_ins = float(m.get("insurance") or 0.0)
+    stmt_bill = parse_float(m.get("bill_amt"))
+
+    # Rail comercial ($1,700 cuando hay Inland Fee en Statement y la hoja tiene columna RAIL)
+    sug_rail = 1700.0 if (stmt_inland > 0 and has_rail_col) else 0.0
+
+    # Previo ($180 o $200 en JAZ) y Seguro ($100)
+    unit_prev = 200.0 if sname.strip().upper() == "JAZ" else 180.0
+    sug_prev = round((stmt_prev / 140.0) * unit_prev, 2) if stmt_prev > 0 else 0.0
+    sug_ins = round(stmt_ins, 2) if stmt_ins > 0 else 0.0
+
+    # Cargos extras en columnas dedicadas vs incluidos en el costo base
+    sug_exw = round(stmt_exw, 2) if has_exw_col else 0.0
+    sug_amend = round(stmt_amend, 2) if has_amend_col else 0.0
+
+    # Costo base de Eliezer que debe quedar cubierto dentro de la columna TOTAL COST de esta hoja
+    base_cost_for_tc = stmt_total
+    if has_rail_col and stmt_inland > 0:
+        base_cost_for_tc -= stmt_inland
+    if has_exw_col and stmt_exw > 0:
+        base_cost_for_tc -= stmt_exw
+    if has_amend_col and stmt_amend > 0:
+        base_cost_for_tc -= stmt_amend
+    base_cost_for_tc = max(0.0, round(base_cost_for_tc, 2))
+
+    # Regla del usuario para TOTAL COST en Concentrado:
+    # - Si Master List trae BILL AMT, se toma ese BILL AMT (restando $1,700 de tren si la hoja separa RAIL y el BILL AMT incluía el tren).
+    # - Si Master List trae vacío el BILL AMT, se calcula: ceil((CostoBase + 350) / 50) * 50.
+    if stmt_bill is not None and stmt_bill > 0:
+        if has_rail_col and stmt_inland > 0 and stmt_bill >= (stmt_sea + stmt_inland):
+            sug_tc = round(stmt_bill - sug_rail, 2)
+        else:
+            sug_tc = round(stmt_bill, 2)
+        formula_label = f"Tomado de BILL AMT (${stmt_bill:,.0f})" + (f" − Rail (${sug_rail:,.0f})" if (has_rail_col and stmt_inland > 0 and stmt_bill >= (stmt_sea + stmt_inland)) else "")
+    else:
+        sug_tc = round_up_50(base_cost_for_tc + 350.0) if base_cost_for_tc > 0 else 0.0
+        formula_label = f"Redondeo múltiplo $50 (Costo ${base_cost_for_tc:,.0f} + $350 → ${sug_tc:,.0f})"
+
+    sug_bill_total = round(sug_tc + sug_rail + sug_prev + sug_ins + sug_exw + sug_amend, 2)
+
+    return {
+        "suggested_total_cost": sug_tc,
+        "suggested_rail": sug_rail,
+        "suggested_previo": sug_prev,
+        "suggested_insurance": sug_ins,
+        "suggested_previo_ins_combined": round(sug_prev + sug_ins, 2),
+        "suggested_exw": sug_exw,
+        "suggested_amend": sug_amend,
+        "suggested_exw_amend": round(stmt_exw + stmt_amend, 2),
+        "suggested_bill_amt": sug_bill_total,
+        "has_rail_col": has_rail_col,
+        "has_sep_prev_ins": has_sep_prev_ins,
+        "formula_label": formula_label,
+    }
+
+
 def audit_statement_vs_concentrado(raw_date: str) -> Dict[str, Any]:
     if not CONCENTRADO_PATH.exists():
         raise HTTPException(status_code=404, detail="No se encontró CONCENTRADO ML LOGISTICS ELIEZER 2026.xlsx")
@@ -783,6 +872,7 @@ def audit_statement_vs_concentrado(raw_date: str) -> Dict[str, Any]:
 
         conc_by_ref = collections.defaultdict(list)
         sheet_distribution = []
+        sheet_headers_map: Dict[str, List[str]] = {}
         cust_to_sheet = collections.defaultdict(collections.Counter)
         cfor_to_sheet = collections.defaultdict(collections.Counter)
         prefix_to_sheet = collections.defaultdict(collections.Counter)
@@ -798,6 +888,7 @@ def audit_statement_vs_concentrado(raw_date: str) -> Dict[str, Any]:
             if len(rows) < 2:
                 continue
             hdr = [str(c).strip().upper() if c is not None else "" for c in rows[1]]
+            sheet_headers_map[sname] = hdr
             r1_balance = next((parse_float(c) for c in (rows[0] if rows else []) if parse_float(c) is not None), None)
             if r1_balance is None:
                 r1_balance = cg_map.get(sname.strip().upper(), 0.0)
@@ -868,23 +959,14 @@ def audit_statement_vs_concentrado(raw_date: str) -> Dict[str, Any]:
                         break
 
             target_sheet = resolve_target_sheet_for_item(m, cust_to_sheet, cfor_to_sheet, prefix_to_sheet)
+            target_hdr = sheet_headers_map.get(target_sheet, ["REF/INV NO", "CUSTOMER", "CUSTOMER FOR", "CONTAINER", "ETD", "ETA", "SHIPPING LINE", "POL", "POD", "TOTAL COST", "RAIL", "PREVIO / INSURANCE", "BILL AMT"])
+            sug = compute_concentrado_target_values_for_item_sheet = compute_concentrado_target_values_for_sheet(m, target_sheet, target_hdr)
 
             if not entries:
-                # Calculate suggested values for Concentrado
-                unit_prev = 200.0 if target_sheet == "JAZ" else 180.0
-                sug_prev = round((m["previo"] / 140.0) * unit_prev, 2) if m["previo"] > 0 else 0.0
-                sug_ins = m["insurance"] if m["insurance"] > 0 else 0.0
-                sug_rail = 1700.0 if m["inland_fee"] > 0 else 0.0
-                sug_sea_bill = m["bill_amt"] if m["bill_amt"] else (m["sea_freight"] + (800.0 if target_sheet == "AB" else 400.0))
-
                 missing_in_concentrado.append({
                     **m,
                     "target_sheet": target_sheet,
-                    "suggested_total_cost": round(sug_sea_bill, 2),
-                    "suggested_rail": round(sug_rail, 2),
-                    "suggested_previo": round(sug_prev, 2),
-                    "suggested_insurance": round(sug_ins, 2),
-                    "suggested_exw_amend": round((m["exw_fee"] or 0.0) + (m["amend_fee"] or 0.0), 2),
+                    **sug,
                 })
                 continue
 
@@ -892,6 +974,7 @@ def audit_statement_vs_concentrado(raw_date: str) -> Dict[str, Any]:
             sname = primary["sheet"]
             rnum = primary["row"]
             hdr = primary["hdr"]
+            sug_sheet = compute_concentrado_target_values_for_sheet(m, sname, hdr)
 
             item_stmt_cost = (m["total_cost"] or 0.0) + (m["previo"] or 0.0) + (m["insurance"] or 0.0)
             item_conc_bill = sum((e.get("bill_amt") or 0.0) for e in entries)
@@ -907,15 +990,10 @@ def audit_statement_vs_concentrado(raw_date: str) -> Dict[str, Any]:
 
             # 1) Previo & Insurance check (Previo in Stmt 140 -> 180 in Conc, or 200 in JAZ)
             prev_ins_cols = [h for h in hdr if "PREVIO" in h or "INSURANCE" in h]
-            has_sep = (
-                any("PREVIO" in h and "INSURANCE" not in h for h in hdr)
-                and any("INSURANCE" in h and "PREVIO" not in h for h in hdr)
-            )
             if prev_ins_cols:
-                unit_prev = 200.0 if sname == "JAZ" else 180.0
-                exp_prev = round((m["previo"] / 140.0) * unit_prev, 2) if m["previo"] > 0 else 0.0
-                exp_ins = m["insurance"] if m["insurance"] > 0 else 0.0
-                exp_sum = exp_prev + exp_ins
+                exp_prev = sug_sheet["suggested_previo"]
+                exp_ins = sug_sheet["suggested_insurance"]
+                exp_sum = sug_sheet["suggested_previo_ins_combined"]
 
                 act_sum = sum(
                     (e["map"].get(h) or 0.0)
@@ -928,6 +1006,10 @@ def audit_statement_vs_concentrado(raw_date: str) -> Dict[str, Any]:
                     # Check if the $180 Previo was already baked into TOTAL COST (e.g. sea + 400 + 180 = sea + 580)
                     baked_in_total = (act_sum == 0 and exp_prev == 180.0 and abs((act_total - m["sea_freight"]) - 580.0) <= 5.0)
                     target_col = prev_ins_cols[0]
+                    if sug_sheet["has_sep_prev_ins"] and exp_prev > 0 and exp_ins == 0:
+                        target_col = next((h for h in hdr if "PREVIO" in h), prev_ins_cols[0])
+                    elif sug_sheet["has_sep_prev_ins"] and exp_ins > 0 and exp_prev == 0:
+                        target_col = next((h for h in hdr if "INSURANCE" in h), prev_ins_cols[0])
                     discrepancies.append({
                         "id": f"PI:{sname}:{rnum}:{ref}",
                         "category": "PREVIO_SEGURO_INCLUIDO_EN_TOTAL" if baked_in_total else "PREVIO_SEGURO",
@@ -958,7 +1040,7 @@ def audit_statement_vs_concentrado(raw_date: str) -> Dict[str, Any]:
                         }
                     })
 
-            # 2) Rail / Inland Fee check (ignoring 1700/1850 rate differences per user rule; only flagging when Inland=0 in Stmt vs Rail>0 in Conc, or Inland>0 in Stmt vs Rail=0 in Conc)
+            # 2) Rail / Inland Fee check
             rail_col = next((h for h in hdr if "RAIL" in h), None)
             act_rail = sum((e["map"].get(rail_col) or 0.0) for e in entries) if rail_col else 0.0
             stmt_inland = m["inland_fee"] or 0.0
@@ -1017,7 +1099,7 @@ def audit_statement_vs_concentrado(raw_date: str) -> Dict[str, Any]:
                         }
                     })
 
-            # 3) Cargos Extras Nuevos (Amend Fee / EXW Fee) y Costos menores al Statement
+            # 3) Cargos Extras Nuevos (Amend Fee / EXW Fee) y Costos menores al Statement usando la regla de BILL AMT o Redondeo Múltiplo de $50 (+350)
             act_exw_amend = sum(
                 (e["map"].get(h) or 0.0)
                 for e in entries
@@ -1026,11 +1108,16 @@ def audit_statement_vs_concentrado(raw_date: str) -> Dict[str, Any]:
             )
             extra_col = next((h for h in hdr if "EXW" in h or "AMEND" in h or "OTHER COST" in h or "DETENTION" in h), "TOTAL COST")
 
-            stmt_cost_no_rail = round((m["total_cost"] or 0.0) - stmt_inland, 2)
+            stmt_cost_no_rail = round((m["total_cost"] or 0.0) - (stmt_inland if rail_col else 0.0), 2)
             conc_rev_no_rail = round(act_total + act_exw_amend, 2)
             p_m = ml_prev_items.get(ref)
 
             if conc_rev_no_rail < stmt_cost_no_rail and sname != "RAMON BETECH":
+                exp_target_val = (
+                    round(m["amend_fee"] + m["exw_fee"], 2)
+                    if (m["amend_fee"] > 0 and extra_col != "TOTAL COST" and act_total >= m["sea_freight"])
+                    else sug_sheet["suggested_total_cost"]
+                )
                 discrepancies.append({
                     "id": f"UNDER:{sname}:{rnum}:{ref}",
                     "category": "COSTO_MENOR_O_CERO",
@@ -1041,24 +1128,25 @@ def audit_statement_vs_concentrado(raw_date: str) -> Dict[str, Any]:
                     "customer": m["customer"],
                     "customer_for": m["customer_for"],
                     "container": m["container"],
-                    "column_name": extra_col if (m["amend_fee"] > 0 or m["exw_fee"] > 0) else "TOTAL COST",
+                    "column_name": extra_col if (m["amend_fee"] > 0 and extra_col != "TOTAL COST" and act_total >= m["sea_freight"]) else "TOTAL COST",
                     "conc_value": conc_rev_no_rail,
-                    "expected_value": round(stmt_cost_no_rail + 400.0, 2) if m["sea_freight"] > 0 else stmt_cost_no_rail,
-                    "delta": round(stmt_cost_no_rail - conc_rev_no_rail, 2),
-                    "description": f"En Concentrado ({sname}) tiene ${conc_rev_no_rail:,.2f} (sin tren), que es MENOR al costo de Eliezer (${stmt_cost_no_rail:,.2f}: Sea=${m['sea_freight']:,.0f}, FOB=${m['fob_cost']:,.0f}, Amend=${m['amend_fee']:,.0f}, EXW=${m['exw_fee']:,.0f})",
+                    "expected_value": exp_target_val,
+                    "delta": round(exp_target_val - conc_rev_no_rail, 2),
+                    "description": f"En Concentrado ({sname}) tiene ${conc_rev_no_rail:,.2f}, menor al costo de Eliezer (${stmt_cost_no_rail:,.2f}). Sugerido según regla de hoja ({sug_sheet['formula_label']}): ${exp_target_val:,.2f}",
                     "can_autofix": True,
                     "fix_action": {
                         "type": "SET_CELL",
                         "sheet": sname,
                         "row": rnum,
                         "ref_no": ref,
-                        "col_header": extra_col if (m["amend_fee"] > 0 and extra_col != "TOTAL COST") else "TOTAL COST",
-                        "new_value": round(m["amend_fee"] + m["exw_fee"], 2) if (m["amend_fee"] > 0 and extra_col != "TOTAL COST") else round(stmt_cost_no_rail + (400.0 if m["sea_freight"] > 0 else 0.0), 2),
+                        "col_header": extra_col if (m["amend_fee"] > 0 and extra_col != "TOTAL COST" and act_total >= m["sea_freight"]) else "TOTAL COST",
+                        "new_value": exp_target_val,
                     }
                 })
             elif p_m and ((m["amend_fee"] - p_m["amend_fee"]) >= 1.0 or (m["exw_fee"] - p_m["exw_fee"]) >= 1.0):
                 if act_exw_amend < (m["amend_fee"] + m["exw_fee"] - 5.0):
                     stmt_extra = round(m["amend_fee"] + m["exw_fee"], 2)
+                    new_cell_val = stmt_extra if extra_col != "TOTAL COST" else sug_sheet["suggested_total_cost"]
                     discrepancies.append({
                         "id": f"NEW_EXTRA:{sname}:{rnum}:{ref}",
                         "category": "CARGO_EXTRA_RECIENTE",
@@ -1070,10 +1158,10 @@ def audit_statement_vs_concentrado(raw_date: str) -> Dict[str, Any]:
                         "customer_for": m["customer_for"],
                         "container": m["container"],
                         "column_name": extra_col,
-                        "conc_value": round(act_exw_amend, 2),
-                        "expected_value": stmt_extra,
-                        "delta": round(stmt_extra - act_exw_amend, 2),
-                        "description": f"Cargo extra agregado en este Statement (Amend=${m['amend_fee']:,.2f}, EXW=${m['exw_fee']:,.2f}) no está reflejado en la columna '{extra_col}' de {sname}",
+                        "conc_value": round(act_exw_amend if extra_col != "TOTAL COST" else act_total, 2),
+                        "expected_value": new_cell_val,
+                        "delta": round(stmt_extra, 2),
+                        "description": f"Cargo extra agregado en este Statement (Amend=${m['amend_fee']:,.2f}, EXW=${m['exw_fee']:,.2f}) no está reflejado en '{extra_col}' de {sname}",
                         "can_autofix": True,
                         "fix_action": {
                             "type": "SET_CELL",
@@ -1081,7 +1169,7 @@ def audit_statement_vs_concentrado(raw_date: str) -> Dict[str, Any]:
                             "row": rnum,
                             "ref_no": ref,
                             "col_header": extra_col,
-                            "new_value": stmt_extra if extra_col != "TOTAL COST" else round(act_total + stmt_extra, 2),
+                            "new_value": new_cell_val,
                         }
                     })
 
@@ -1425,6 +1513,9 @@ def apply_concentrado_fixes(req: ApplyConcentradoFixesRequest):
             while ws.cell(row=next_row, column=1).value is not None and str(ws.cell(row=next_row, column=1).value).strip() != "":
                 next_row += 1
 
+            has_sep_prev_ins = ("PREVIO" in hdr_row and "INSURANCE" in hdr_row)
+            has_sep_exw_amend = (any("EXW" in h for h in hdr_row if h) and any("AMEND" in h for h in hdr_row if h))
+
             for col_i, h in enumerate(hdr_row, start=1):
                 if not h:
                     continue
@@ -1451,22 +1542,35 @@ def apply_concentrado_fixes(req: ApplyConcentradoFixesRequest):
                 elif "RAIL" in h:
                     ws.cell(row=next_row, column=col_i, value=it.get("suggested_rail", 0.0))
                 elif "PREVIO" in h and "INSURANCE" in h:
-                    ws.cell(row=next_row, column=col_i, value=(it.get("suggested_previo", 0.0) + it.get("suggested_insurance", 0.0)))
+                    ws.cell(row=next_row, column=col_i, value=it.get("suggested_previo_ins_comb", (it.get("suggested_previo", 0.0) + it.get("suggested_insurance", 0.0))))
                 elif "PREVIO" in h:
                     ws.cell(row=next_row, column=col_i, value=it.get("suggested_previo", 0.0))
                 elif "INSURANCE" in h:
-                    ws.cell(row=next_row, column=col_i, value=it.get("suggested_insurance", 0.0))
+                    if has_sep_prev_ins:
+                        ws.cell(row=next_row, column=col_i, value=it.get("suggested_insurance", 0.0))
+                    else:
+                        # Hoja con columna única llamada INSURANCE (ej. SALOMON JASQUI) donde van sumados Previo + Seguro
+                        ws.cell(row=next_row, column=col_i, value=it.get("suggested_previo_ins_comb", (it.get("suggested_previo", 0.0) + it.get("suggested_insurance", 0.0))))
+                elif "EXW" in h and "AMEND" not in h and has_sep_exw_amend:
+                    ws.cell(row=next_row, column=col_i, value=it.get("suggested_exw_only", it.get("exw", 0.0)))
+                elif "AMEND" in h and "EXW" not in h and has_sep_exw_amend:
+                    ws.cell(row=next_row, column=col_i, value=it.get("suggested_amend_only", it.get("amend", 0.0)))
                 elif "EXW" in h or "AMEND" in h or "OTHER COST" in h:
                     ws.cell(row=next_row, column=col_i, value=it.get("suggested_exw_amend", 0.0))
+                elif "DETENTION" in h:
+                    ws.cell(row=next_row, column=col_i, value=it.get("suggested_detention", it.get("demurrage", 0.0)))
                 elif h == "BILL AMT":
-                    # Copy formula pattern from previous row if available
-                    if next_row > 3:
-                        prev_formula = ws.cell(row=next_row - 1, column=col_i).value
+                    # Buscar fórmula en la fila inmediata anterior o en alguna fila superior de la hoja
+                    formula_copied = False
+                    for search_r in range(next_row - 1, 2, -1):
+                        prev_formula = ws.cell(row=search_r, column=col_i).value
                         if isinstance(prev_formula, str) and prev_formula.startswith("="):
-                            new_f = re.sub(rf"{next_row - 1}\b", str(next_row), prev_formula)
+                            new_f = re.sub(rf"\b([A-Z]+){search_r}\b", rf"\g<1>{next_row}", prev_formula)
                             ws.cell(row=next_row, column=col_i, value=new_f)
-                        else:
-                            ws.cell(row=next_row, column=col_i, value=it.get("suggested_total_cost", 0.0))
+                            formula_copied = True
+                            break
+                    if not formula_copied:
+                        ws.cell(row=next_row, column=col_i, value=it.get("suggested_bill_amt", it.get("suggested_total_cost", 0.0)))
             applied_count += 1
 
     try:

@@ -1132,6 +1132,117 @@ function renderAccountingTables() {
 }
 
 // ================= VIEW 5: CONCENTRADO ML 2026 VS STATEMENT =================
+function roundUp50Client(val) {
+  if (!val || val <= 0) return 0;
+  return Math.ceil((val - 1e-9) / 50.0) * 50.0;
+}
+
+function guessConcentradoSheetClient(m, sheetDist) {
+  const cfor = String(m.customer_for || '').trim().toUpperCase();
+  const cust = String(m.customer || '').trim().toUpperCase();
+  const ref = String(m.ref_no || '').trim().toUpperCase();
+  const sheetNames = (sheetDist || []).map(s => s.sheet.toUpperCase());
+
+  if (sheetNames.includes(cfor)) {
+    return sheetDist.find(s => s.sheet.toUpperCase() === cfor).sheet;
+  }
+  const directMap = {
+    'MOBIL ZONE': 'MOBIL',
+    'RED': 'RED',
+    'RED PACK': 'RED',
+    'LOGISTICA': 'LOGISTICA ',
+    'CARSO': 'CICSA',
+    'CICSA': 'CICSA',
+    'SALOMON': 'SALOMON JASQUI',
+    'JASQUI': 'SALOMON JASQUI',
+    'BODEGA AURRERA': 'AURRERA',
+    'DECATHLON': 'DECATHLON',
+    'HUAWEI': 'HUAWEI',
+    'MINISO': 'MINISO',
+  };
+  if (directMap[cfor]) return directMap[cfor];
+  if (directMap[cust]) return directMap[cust];
+
+  for (const s of (sheetDist || [])) {
+    if ((s.mapped_customers_for || []).some(cf => cf.toUpperCase() === cfor)) {
+      return s.sheet;
+    }
+  }
+  if (sheetNames.includes(cust)) {
+    return sheetDist.find(s => s.sheet.toUpperCase() === cust).sheet;
+  }
+  return cfor || cust || 'GENERAL';
+}
+
+function computeConcentradoTargetClient(m, targetSheet, sheetMeta) {
+  const hdrs = (sheetMeta?.headers || []).map(h => String(h || '').toUpperCase());
+  const hasRailCol = hdrs.some(h => h.includes('RAIL'));
+  const hasSepPrevIns = hdrs.includes('PREVIO') && hdrs.includes('INSURANCE');
+  const hasCombPrevIns = hdrs.some(h => h.includes('PREVIO') && h.includes('INSURANCE')) || (!hasSepPrevIns && hdrs.includes('INSURANCE'));
+  const hasExwCol = hdrs.some(h => h.includes('EXW') || h.includes('AMEND') || h.includes('OTHER COST'));
+  const hasDetCol = hdrs.some(h => h.includes('DETENTION'));
+
+  const sea = Number(m.sea_freight || 0);
+  const fob = Number(m.fob_cost || 0);
+  const amend = Number(m.amend_fee || 0);
+  const exw = Number(m.exw_fee || 0);
+  const inland = Number(m.inland_fee || 0);
+  const stmtTotal = Number(m.total_cost || 0);
+  const stmtPrev = Number(m.previo || 0);
+  const stmtIns = Number(m.insurance || 0);
+  const stmtBill = typeof m.bill_amt === 'number' && m.bill_amt > 0 ? m.bill_amt : null;
+
+  const suggRail = inland > 0 ? (inland <= 1700 ? 1700 : 1850) : 0;
+  const suggPrevio = stmtPrev > 0 ? (String(targetSheet).trim().toUpperCase() === 'JAZ' ? 200 : 180) : 0;
+  const suggIns = stmtIns > 0 ? stmtIns : 0;
+  const suggExwAmend = exw + amend;
+
+  const baseNoRail = sea + fob + (hasExwCol ? 0 : (exw + amend));
+  let suggTotalCost = 0;
+  let formulaLabel = '';
+
+  if (stmtBill !== null) {
+    if (hasRailCol && inland > 0 && stmtBill >= (baseNoRail + inland)) {
+      suggTotalCost = stmtBill - suggRail;
+      formulaLabel = `Tomado de BILL AMT ($${stmtBill.toLocaleString()}) − Rail ($${suggRail.toLocaleString()})`;
+    } else {
+      suggTotalCost = stmtBill;
+      formulaLabel = `Tomado directo de BILL AMT ($${stmtBill.toLocaleString()})`;
+    }
+  } else {
+    if (hasRailCol || inland === 0) {
+      suggTotalCost = roundUp50Client(baseNoRail + 350);
+      formulaLabel = `Redondeo múltiplo $50 (Costo $${baseNoRail.toLocaleString()} + $350 → $${suggTotalCost.toLocaleString()})`;
+    } else {
+      const baseWithRail = baseNoRail + suggRail;
+      suggTotalCost = roundUp50Client(baseWithRail + 350);
+      formulaLabel = `Redondeo múltiplo $50 c/Tren ($${baseWithRail.toLocaleString()} + $350 → $${suggTotalCost.toLocaleString()})`;
+    }
+  }
+
+  const suggBillAmt = (
+    suggTotalCost +
+    (hasRailCol ? suggRail : 0) +
+    ((hasSepPrevIns || hasCombPrevIns) ? (suggPrevio + suggIns) : 0) +
+    (hasExwCol ? suggExwAmend : 0)
+  );
+
+  return {
+    suggested_total_cost: suggTotalCost,
+    suggested_rail: hasRailCol ? suggRail : 0,
+    suggested_previo: suggPrevio,
+    suggested_insurance: suggIns,
+    suggested_previo_ins_comb: suggPrevio + suggIns,
+    suggested_exw_amend: hasExwCol ? suggExwAmend : 0,
+    suggested_exw_only: exw,
+    suggested_amend_only: amend,
+    suggested_detention: 0,
+    suggested_bill_amt: suggBillAmt,
+    stmt_bill_amt: stmtBill,
+    formula_label: formulaLabel,
+  };
+}
+
 async function loadConcentradoOverview() {
   if (!state.activeRawDate) return;
   if (!state.isStaticMode) {
@@ -1139,7 +1250,52 @@ async function loadConcentradoOverview() {
     state.concentrado = await res.json();
   } else {
     let concData = await fetchStaticData(`concentrado/${state.activeRawDate}.json`);
-    if (!concData) concData = await fetchStaticData(`concentrado/${state.statements[0].raw_date}.json`);
+    if (!concData) {
+      // Statement nuevo subido en el navegador: partimos de la base del Concentrado y detectamos referencias nuevas
+      const baseConc = await fetchStaticData(`concentrado/${state.statements.find(s => s.raw_date !== state.activeRawDate)?.raw_date || '20260414'}.json`);
+      if (baseConc) {
+        concData = JSON.parse(JSON.stringify(baseConc));
+        const baseRefs = new Set();
+        const latestBaseStmt = await fetchStaticData(`statements/20260414.json`);
+        (latestBaseStmt?.master_items || []).forEach(it => baseRefs.add(String(it.ref_no || '').trim().toUpperCase()));
+        (concData.discrepancies || []).forEach(d => baseRefs.add(String(d.ref_no || '').trim().toUpperCase()));
+
+        const currentItems = state.currentDetail?.master_items || [];
+        const newMissing = [];
+        currentItems.forEach(m => {
+          const rUp = String(m.ref_no || '').trim().toUpperCase();
+          if (rUp && !baseRefs.has(rUp)) {
+            const targetSheet = guessConcentradoSheetClient(m, concData.sheet_distribution);
+            const sheetMeta = (concData.sheet_distribution || []).find(s => s.sheet === targetSheet);
+            const calc = computeConcentradoTargetClient(m, targetSheet, sheetMeta);
+            newMissing.push({
+              ref_no: m.ref_no,
+              customer: m.customer,
+              customer_for: m.customer_for,
+              container: m.container,
+              etd: m.etd,
+              eta: m.eta,
+              update_eta: m.update_eta,
+              shipping_line: m.shipping_line,
+              pol: m.pol,
+              pod: m.pod,
+              sea_freight: m.sea_freight,
+              fob_cost: m.fob_cost,
+              inland_fee: m.inland_fee,
+              total_cost: m.total_cost,
+              previo: m.previo,
+              insurance: m.insurance,
+              exw: m.exw_fee,
+              amend: m.amend_fee,
+              target_sheet: targetSheet,
+              ...calc,
+            });
+          }
+        });
+        concData.missing_in_concentrado = newMissing;
+        concData.summary.missing_refs_count = newMissing.length;
+      }
+    }
     state.concentrado = concData;
   }
   renderConcentradoView();
@@ -1199,7 +1355,7 @@ function renderConcentradoView() {
         <div>
           <div class="card-panel-title">🔍 Diferencias Detectadas entre Statement (${state.currentDiff?.stmt_date || ''}) y Concentrado</div>
           <p style="font-size:12.5px; color:var(--text-secondary); margin-top:2px;">
-            Se evalúa cada referencia en su pestaña correspondiente considerando Previo en <strong>$180</strong> ($200 en JAZ), Seguro en <strong>$100</strong> y tarifas de Tren (Rail $1,700 / $1,850).
+            Se evalúa cada referencia según la lógica de su pestaña: si trae <code>BILL AMT</code> en el Statement pasa como <strong>TOTAL COST</strong> (descontando Rail $1,700 si la hoja tiene columna Rail); si viene vacío se suma <strong>+$350 y se redondea hacia arriba al múltiplo de $50</strong>, más Previo ($180 / $200 en JAZ) y Seguro ($100) sumados o separados según la hoja.
           </p>
         </div>
         <div style="display:flex; gap:8px;">
@@ -1258,7 +1414,7 @@ function renderConcentradoView() {
           <div style="font-size:32px; margin-bottom:8px;">✅</div>
           <h3 style="font-size:16px; font-weight:800; margin-bottom:4px;">¡Todas las referencias del Statement ${state.currentDiff?.stmt_date || ''} ya están en sus hojas del Concentrado!</h3>
           <p style="font-size:13px; color:var(--text-secondary);">
-            Cuando subas el próximo Statement semanal con referencias nuevas, aparecerán aquí listas para insertarse automáticamente en su pestaña respectiva.
+            Cuando subas el próximo Statement semanal con referencias nuevas, aparecerán aquí con su <strong>TOTAL COST</strong> calculado (ya sea tomando el <code>BILL AMT</code> del Statement o sumando <strong>+$350 redondeado hacia arriba al múltiplo de $50</strong> cuando venga vacío) y respetando las columnas propias de cada hoja.
           </p>
         </div>
       `;
@@ -1270,7 +1426,7 @@ function renderConcentradoView() {
         <div>
           <div class="card-panel-title">➕ Referencias Nuevas del Statement Pendientes de Insertar en el Concentrado</div>
           <p style="font-size:12.5px; color:var(--text-secondary);">
-            El sistema asigna automáticamente la pestaña destino según <code>CUSTOMER FOR</code>, <code>CUSTOMER</code> y prefijo de referencia, con Previo en $180 y Rail en $1,700.
+            Si el Statement trae <code>BILL AMT</code> se usa como base para <strong>TOTAL COST</strong>; si viene vacío se calcula <strong>Costo + $350 redondeado al múltiplo de $50 superior</strong> y se respeta si la pestaña une o separa Previo ($180) y Seguro ($100).
           </p>
         </div>
         <button class="btn-gold" onclick="insertAllMissingToConcentrado()">
@@ -1283,13 +1439,16 @@ function renderConcentradoView() {
             <tr>
               <th>Pestaña Destino</th>
               <th>REF / INV NO</th>
-              <th>Customer</th>
-              <th>Customer For</th>
+              <th>Customer / For</th>
               <th>Container</th>
-              <th>Total Cost Sugerido</th>
-              <th>Rail Sugerido</th>
-              <th>Previo ($180) + Seg ($100)</th>
+              <th>Costo Eliezer</th>
+              <th>BILL AMT (Stmt)</th>
+              <th>Regla Aplicada en Hoja</th>
+              <th>TOTAL COST (Conc.)</th>
+              <th>Rail</th>
+              <th>Previo + Seg</th>
               <th>EXW / Amend</th>
+              <th>BILL AMT Total</th>
               <th>Acción</th>
             </tr>
           </thead>
@@ -1298,13 +1457,16 @@ function renderConcentradoView() {
               <tr>
                 <td><span class="status-pill">${esc(m.target_sheet)}</span></td>
                 <td><strong>${esc(m.ref_no)}</strong></td>
-                <td>${esc(m.customer)}</td>
-                <td>${esc(m.customer_for)}</td>
+                <td><strong>${esc(m.customer_for)}</strong><br/><span style="font-size:11px; color:var(--text-secondary);">${esc(m.customer)}</span></td>
                 <td><code>${esc(m.container)}</code></td>
-                <td><strong>${fmtMoney(m.suggested_total_cost)}</strong></td>
+                <td>${fmtMoney(m.total_cost)}</td>
+                <td>${m.stmt_bill_amt ? `<strong>${fmtMoney(m.stmt_bill_amt)}</strong>` : '<span style="color:var(--text-muted)">Vacío (Comercial)</span>'}</td>
+                <td><span class="diff-chip">${esc(m.formula_label || 'Redondeo múltiplo $50 (+350)')}</span></td>
+                <td style="color:var(--green-text); font-weight:800;">${fmtMoney(m.suggested_total_cost)}</td>
                 <td>${fmtMoney(m.suggested_rail)}</td>
-                <td>${fmtMoney(m.suggested_previo + m.suggested_insurance)}</td>
+                <td>${fmtMoney((m.suggested_previo || 0) + (m.suggested_insurance || 0))}</td>
                 <td>${fmtMoney(m.suggested_exw_amend)}</td>
+                <td><strong>${fmtMoney(m.suggested_bill_amt || ((m.suggested_total_cost || 0) + (m.suggested_rail || 0) + (m.suggested_previo || 0) + (m.suggested_insurance || 0) + (m.suggested_exw_amend || 0)))}</strong></td>
                 <td>
                   <button class="btn-gold" style="padding:5px 10px; font-size:11.5px;" onclick="insertSingleMissingToConcentrado(${idx})">
                     ➕ Insertar en ${esc(m.target_sheet)}
@@ -1479,7 +1641,7 @@ async function sendConcentradoActions(actions, successMsg) {
     showToast(successMsg);
     await loadConcentradoOverview();
   } else {
-    // In Static Web App mode, update the in-memory discrepancies list and mark applied
+    state.pendingStaticConcentradoActions = (state.pendingStaticConcentradoActions || []).concat(actions);
     const fixedRefs = new Set(actions.map(a => `${a.sheet}:${a.ref_no}`));
     if (state.concentrado) {
       state.concentrado.discrepancies = (state.concentrado.discrepancies || []).filter(
@@ -1491,24 +1653,102 @@ async function sendConcentradoActions(actions, successMsg) {
       state.concentrado.summary.high_discrepancies_count = state.concentrado.discrepancies.filter(d => d.severity === 'high').length;
       state.concentrado.summary.missing_refs_count = state.concentrado.missing_in_concentrado.length;
     }
-    showToast(`${successMsg} (Usa "Descargar Concentrado" para bajar el Excel)`);
+    showToast(`${successMsg} (Usa "Descargar Concentrado" para bajar el Excel actualizado)`);
     renderConcentradoView();
     renderDashboard();
   }
 }
 
-function downloadConcentradoFile() {
+async function downloadConcentradoFile() {
   if (!state.isStaticMode) {
     window.location.href = '/api/concentrado/download';
-  } else {
+    showToast('⬇️ Descargando CONCENTRADO ML LOGISTICS ELIEZER 2026.xlsx...');
+    return;
+  }
+
+  const pending = state.pendingStaticConcentradoActions || [];
+  if (!pending.length || typeof XLSX === 'undefined') {
     const a = document.createElement('a');
     a.href = 'data/CONCENTRADO ML LOGISTICS ELIEZER 2026.xlsx';
     a.download = 'CONCENTRADO ML LOGISTICS ELIEZER 2026.xlsx';
     document.body.appendChild(a);
     a.click();
     a.remove();
+    showToast('⬇️ Descargando CONCENTRADO ML LOGISTICS ELIEZER 2026.xlsx...');
+    return;
   }
-  showToast('⬇️ Descargando CONCENTRADO ML LOGISTICS ELIEZER 2026.xlsx...');
+
+  showToast('⏳ Generando CONCENTRADO ML LOGISTICS ELIEZER 2026.xlsx con cambios aplicados...');
+  try {
+    const resp = await fetch('data/CONCENTRADO ML LOGISTICS ELIEZER 2026.xlsx');
+    const buf = await resp.arrayBuffer();
+    const wb = XLSX.read(new Uint8Array(buf), { type: 'array', cellFormula: true, cellStyles: true });
+
+    for (const act of pending) {
+      const ws = wb.Sheets[act.sheet];
+      if (!ws) continue;
+      const hdrRow = [];
+      for (let c = 0; c < 24; c++) {
+        const cell = ws[XLSX.utils.encode_cell({ r: 1, c })];
+        hdrRow.push(cell && cell.v ? String(cell.v).trim().toUpperCase() : '');
+      }
+
+      if (act.type === 'SET_CELL' && act.row && act.col_header) {
+        const colIdx = hdrRow.findIndex(h => h === act.col_header.trim().toUpperCase());
+        if (colIdx >= 0) {
+          const addr = XLSX.utils.encode_cell({ r: act.row - 1, c: colIdx });
+          ws[addr] = { t: 'n', v: Number(act.new_value || 0) };
+        }
+      } else if (act.type === 'INSERT_REF' && act.item) {
+        const it = act.item;
+        let nextR = 2; // 0-indexed row 3
+        while (true) {
+          const cA = ws[XLSX.utils.encode_cell({ r: nextR, c: 0 })];
+          if (!cA || cA.v === undefined || cA.v === null || String(cA.v).trim() === '') break;
+          nextR++;
+        }
+        const excelRow = nextR + 1;
+        const hasSepPrevIns = hdrRow.includes('PREVIO') && hdrRow.includes('INSURANCE');
+        const hasSepExwAmend = hdrRow.some(h => h.includes('EXW')) && hdrRow.some(h => h.includes('AMEND'));
+
+        hdrRow.forEach((h, cIdx) => {
+          if (!h) return;
+          const addr = XLSX.utils.encode_cell({ r: nextR, c: cIdx });
+          if (h.includes('REF/INV')) ws[addr] = { t: 's', v: it.ref_no || '' };
+          else if (h === 'CUSTOMER') ws[addr] = { t: 's', v: it.customer || '' };
+          else if (h === 'CUSTOMER FOR') ws[addr] = { t: 's', v: it.customer_for || '' };
+          else if (h === 'CONTAINER') ws[addr] = { t: 's', v: it.container || '' };
+          else if (h === 'ETD') ws[addr] = { t: 's', v: it.etd || '' };
+          else if (h === 'ETA') ws[addr] = { t: 's', v: it.update_eta || it.eta || '' };
+          else if (h === 'SHIPPING LINE') ws[addr] = { t: 's', v: it.shipping_line || '' };
+          else if (h === 'POL') ws[addr] = { t: 's', v: it.pol || '' };
+          else if (h === 'POD') ws[addr] = { t: 's', v: it.pod || '' };
+          else if (h === 'TOTAL COST') ws[addr] = { t: 'n', v: Number(it.suggested_total_cost || 0) };
+          else if (h.includes('RAIL')) ws[addr] = { t: 'n', v: Number(it.suggested_rail || 0) };
+          else if (h.includes('PREVIO') && h.includes('INSURANCE')) {
+            ws[addr] = { t: 'n', v: Number(it.suggested_previo_ins_comb ?? ((it.suggested_previo || 0) + (it.suggested_insurance || 0))) };
+          } else if (h.includes('PREVIO')) {
+            ws[addr] = { t: 'n', v: Number(it.suggested_previo || 0) };
+          } else if (h.includes('INSURANCE')) {
+            ws[addr] = { t: 'n', v: Number(hasSepPrevIns ? (it.suggested_insurance || 0) : (it.suggested_previo_ins_comb ?? ((it.suggested_previo || 0) + (it.suggested_insurance || 0)))) };
+          } else if (h.includes('EXW') && !h.includes('AMEND') && hasSepExwAmend) {
+            ws[addr] = { t: 'n', v: Number(it.suggested_exw_only ?? it.exw ?? 0) };
+          } else if (h.includes('AMEND') && !h.includes('EXW') && hasSepExwAmend) {
+            ws[addr] = { t: 'n', v: Number(it.suggested_amend_only ?? it.amend ?? 0) };
+          } else if (h.includes('EXW') || h.includes('AMEND') || h.includes('OTHER COST')) {
+            ws[addr] = { t: 'n', v: Number(it.suggested_exw_amend || 0) };
+          } else if (h === 'BILL AMT') {
+            ws[addr] = { t: 'n', v: Number(it.suggested_bill_amt || it.suggested_total_cost || 0) };
+          }
+        });
+      }
+    }
+    XLSX.writeFile(wb, `CONCENTRADO ML LOGISTICS ELIEZER 2026 (${new Date().toISOString().slice(0, 10)}).xlsx`);
+    showToast('✅ Concentrado descargado con todas las referencias y reglas aplicadas');
+  } catch (err) {
+    console.error(err);
+    alert('Error al generar el Excel en el navegador: ' + err.message);
+  }
 }
 
 // ================= REVIEW / APPROVAL ACTIONS =================
