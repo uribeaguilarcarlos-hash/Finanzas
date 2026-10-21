@@ -1800,108 +1800,228 @@ async function downloadConcentradoFile() {
     return;
   }
 
-  const pending = state.pendingStaticConcentradoActions || [];
-  if (!pending.length || typeof XLSX === 'undefined') {
+  // En modo estático (Azure Static Web Apps)
+  // Recuperar las acciones pendientes de memoria o de localStorage
+  const storedPending = JSON.parse(localStorage.getItem('ml_pending_actions_v1') || '[]');
+  const pending = (state.pendingStaticConcentradoActions && state.pendingStaticConcentradoActions.length)
+    ? state.pendingStaticConcentradoActions
+    : storedPending;
+
+  if (!pending.length) {
     const a = document.createElement('a');
     a.href = 'data/CONCENTRADO ML LOGISTICS ELIEZER 2026.xlsx';
-    a.download = 'CONCENTRADO ML LOGISTICS ELIEZER 2026.xlsx';
+    a.download = `CONCENTRADO ML LOGISTICS ELIEZER 2026 (${new Date().toISOString().slice(0, 10)}).xlsx`;
     document.body.appendChild(a);
     a.click();
     a.remove();
-    showToast('⬇️ Descargando CONCENTRADO ML LOGISTICS ELIEZER 2026.xlsx...');
+    showToast('⬇️ Descargando Concentrado base...');
     return;
   }
 
-  showToast('⏳ Generando CONCENTRADO ML LOGISTICS ELIEZER 2026.xlsx con cambios aplicados...');
-  try {
-    const resp = await fetch('data/CONCENTRADO ML LOGISTICS ELIEZER 2026.xlsx');
-    const buf = await resp.arrayBuffer();
-    const wb = XLSX.read(new Uint8Array(buf), { type: 'array', cellFormula: true, cellStyles: true });
+  showToast('⏳ Modificando Concentrado conservando el 100% de formatos, fórmulas y colores...');
 
+  try {
+    // 1. Cargar el ZIP del Excel original y los metadatos XML
+    const [xlsxResp, metaResp] = await Promise.all([
+      fetch('data/CONCENTRADO ML LOGISTICS ELIEZER 2026.xlsx'),
+      fetch('data/concentrado_xml_meta.json')
+    ]);
+
+    const xlsxArrayBuf = await xlsxResp.arrayBuffer();
+    const meta = await metaResp.json();
+
+    if (typeof JSZip === 'undefined') {
+      throw new Error('La librería JSZip no se ha cargado en el navegador');
+    }
+
+    const zip = await JSZip.loadAsync(xlsxArrayBuf);
+    const blueXfs = new Set(meta.blue_xfs || []);
+    const blueToWhite = meta.blue_to_white || {};
+    const sheetBlueTemplates = meta.sheet_blue_templates || {};
+    const sheetPaths = meta.sheet_paths || {};
+    const sheetHeaders = meta.sheet_headers || {};
+    const sheetFormulaTemplates = meta.sheet_formula_templates || {};
+
+    // Agrupar acciones por hoja
+    const actionsBySheet = {};
     for (const act of pending) {
-      const ws = wb.Sheets[act.sheet];
-      if (!ws) continue;
-      const hdrRow = [];
-      for (let c = 0; c < 24; c++) {
-        const cell = ws[XLSX.utils.encode_cell({ r: 1, c })];
-        hdrRow.push(cell && cell.v ? String(cell.v).trim().toUpperCase() : '');
+      if (!actionsBySheet[act.sheet]) actionsBySheet[act.sheet] = [];
+      actionsBySheet[act.sheet].push(act);
+    }
+
+    const parser = new DOMParser();
+    const serializer = new XMLSerializer();
+
+    for (const sheetName of Object.keys(actionsBySheet)) {
+      const sheetPath = sheetPaths[sheetName];
+      if (!sheetPath) continue;
+      const fileEntry = zip.file(sheetPath);
+      if (!fileEntry) continue;
+
+      const xmlText = await fileEntry.async('string');
+      const doc = parser.parseFromString(xmlText, 'application/xml');
+      const sheetData = doc.querySelector('sheetData');
+      if (!sheetData) continue;
+
+      const existingRows = Array.from(sheetData.querySelectorAll('row'));
+      let maxRow = 2;
+      for (const r of existingRows) {
+        const rNum = parseInt(r.getAttribute('r') || '0', 10);
+        if (rNum > maxRow) maxRow = rNum;
       }
 
-      if (act.type === 'SET_CELL' && act.row && act.col_header) {
-        const colIdx = hdrRow.findIndex(h => h === act.col_header.trim().toUpperCase());
-        if (colIdx >= 0) {
-          const addr = XLSX.utils.encode_cell({ r: act.row - 1, c: colIdx });
-          ws[addr] = { t: 'n', v: Number(act.new_value || 0) };
-        }
-      } else if (act.type === 'INSERT_REF' && act.item) {
-        const it = act.item;
-        let nextR = 2; // 0-indexed row 3
-        while (true) {
-          const cA = ws[XLSX.utils.encode_cell({ r: nextR, c: 0 })];
-          if (!cA || cA.v === undefined || cA.v === null || String(cA.v).trim() === '') break;
-          nextR++;
+      // PASO 1: Blanquear filas previas que estaban en azul (SIN TOCAR LAS AMARILLAS)
+      for (const r of existingRows) {
+        const rNum = parseInt(r.getAttribute('r') || '0', 10);
+        if (rNum < 3) continue;
+
+        let rowHasBlue = false;
+        const cells = Array.from(r.querySelectorAll('c'));
+        for (const c of cells) {
+          const sId = parseInt(c.getAttribute('s') || '0', 10);
+          if (blueXfs.has(sId)) {
+            rowHasBlue = true;
+            break;
+          }
         }
 
-        // Poner en fondo blanco las referencias previas que tenían azul (preservando las amarillas)
-        for (let prevR = 2; prevR < nextR; prevR++) {
-          const cellA = ws[XLSX.utils.encode_cell({ r: prevR, c: 0 })];
-          if (cellA && cellA.s && cellA.s.fill && cellA.s.fill.fgColor) {
-            const rgb = String(cellA.s.fill.fgColor.rgb || '').toUpperCase();
-            if (rgb === 'D9E1F2' || rgb === 'FFD9E1F2' || rgb === 'B4C6E7' || rgb === 'FFB4C6E7') {
-              for (let colK = 0; colK < hdrRow.length; colK++) {
-                const cellK = ws[XLSX.utils.encode_cell({ r: prevR, c: colK })];
-                if (cellK) {
-                  delete cellK.s;
-                }
-              }
+        if (rowHasBlue) {
+          for (const c of cells) {
+            const sId = parseInt(c.getAttribute('s') || '0', 10);
+            if (blueXfs.has(sId)) {
+              const newSId = blueToWhite[sId] !== undefined ? blueToWhite[sId] : 0;
+              c.setAttribute('s', String(newSId));
             }
           }
         }
-
-        const excelRow = nextR + 1;
-        const hasSepPrevIns = hdrRow.includes('PREVIO') && hdrRow.includes('INSURANCE');
-        const hasSepExwAmend = hdrRow.some(h => h.includes('EXW')) && hdrRow.some(h => h.includes('AMEND'));
-
-        hdrRow.forEach((h, cIdx) => {
-          if (!h) return;
-          const addr = XLSX.utils.encode_cell({ r: nextR, c: cIdx });
-          const blueStyle = {
-            fill: { fgColor: { rgb: "D9E1F2" } },
-            font: { color: { rgb: "1F497D" }, bold: true }
-          };
-
-          if (h.includes('REF/INV')) ws[addr] = { t: 's', v: it.ref_no || '', s: blueStyle };
-          else if (h === 'CUSTOMER') ws[addr] = { t: 's', v: it.customer || '', s: blueStyle };
-          else if (h === 'CUSTOMER FOR') ws[addr] = { t: 's', v: it.customer_for || '', s: blueStyle };
-          else if (h === 'CONTAINER') ws[addr] = { t: 's', v: it.container || '', s: blueStyle };
-          else if (h === 'ETD') ws[addr] = { t: 's', v: it.etd || '', s: blueStyle };
-          else if (h === 'ETA') ws[addr] = { t: 's', v: it.update_eta || it.eta || '', s: blueStyle };
-          else if (h === 'SHIPPING LINE') ws[addr] = { t: 's', v: it.shipping_line || '', s: blueStyle };
-          else if (h === 'POL') ws[addr] = { t: 's', v: it.pol || '', s: blueStyle };
-          else if (h === 'POD') ws[addr] = { t: 's', v: it.pod || '', s: blueStyle };
-          else if (h === 'TOTAL COST') ws[addr] = { t: 'n', v: Number(it.suggested_total_cost || 0), s: blueStyle };
-          else if (h.includes('RAIL')) ws[addr] = { t: 'n', v: Number(it.suggested_rail || 0), s: blueStyle };
-          else if (h.includes('PREVIO') && h.includes('INSURANCE')) {
-            ws[addr] = { t: 'n', v: Number(it.suggested_previo_ins_comb ?? ((it.suggested_previo || 0) + (it.suggested_insurance || 0))), s: blueStyle };
-          } else if (h.includes('PREVIO')) {
-            ws[addr] = { t: 'n', v: Number(it.suggested_previo || 0), s: blueStyle };
-          } else if (h.includes('INSURANCE')) {
-            ws[addr] = { t: 'n', v: Number(hasSepPrevIns ? (it.suggested_insurance || 0) : (it.suggested_previo_ins_comb ?? ((it.suggested_previo || 0) + (it.suggested_insurance || 0)))), s: blueStyle };
-          } else if (h.includes('EXW') && !h.includes('AMEND') && hasSepExwAmend) {
-            ws[addr] = { t: 'n', v: Number(it.suggested_exw_only ?? it.exw ?? 0), s: blueStyle };
-          } else if (h.includes('AMEND') && !h.includes('EXW') && hasSepExwAmend) {
-            ws[addr] = { t: 'n', v: Number(it.suggested_amend_only ?? it.amend ?? 0), s: blueStyle };
-          } else if (h.includes('EXW') || h.includes('AMEND') || h.includes('OTHER COST')) {
-            ws[addr] = { t: 'n', v: Number(it.suggested_exw_amend || 0), s: blueStyle };
-          } else if (h === 'BILL AMT') {
-            ws[addr] = { t: 'n', v: Number(it.suggested_bill_amt || it.suggested_total_cost || 0), s: blueStyle };
-          }
-        });
       }
+
+      // PASO 2: Procesar las acciones (INSERT_REF y SET_CELL)
+      const hdrs = sheetHeaders[sheetName] || {};
+      const formulaTpl = sheetFormulaTemplates[sheetName] || {};
+      const blueTpl = sheetBlueTemplates[sheetName] || {};
+
+      let currNextRow = maxRow + 1;
+
+      for (const act of actionsBySheet[sheetName]) {
+        if (act.type === 'INSERT_REF' && act.item) {
+          const it = act.item;
+          const newRowElem = doc.createElementNS('http://schemas.openxmlformats.org/spreadsheetml/2006/main', 'row');
+          newRowElem.setAttribute('r', String(currNextRow));
+          newRowElem.setAttribute('spans', '1:24');
+
+          // Iterar por las columnas definidas en las cabeceras
+          for (const colLetter of Object.keys(hdrs)) {
+            const hText = hdrs[colLetter] || '';
+            const cellElem = doc.createElementNS('http://schemas.openxmlformats.org/spreadsheetml/2006/main', 'c');
+            const cellRef = `${colLetter}${currNextRow}`;
+            cellElem.setAttribute('r', cellRef);
+
+            // Asignar estilo azul exacto
+            const styleId = blueTpl[colLetter] !== undefined ? blueTpl[colLetter] : 423;
+            cellElem.setAttribute('s', String(styleId));
+
+            // Fórmulas automáticas (por ejemplo SUM(J4:K4) o L4)
+            if (formulaTpl[colLetter]) {
+              const [origR, origF] = formulaTpl[colLetter];
+              // Adaptar números de fila en la fórmula
+              const adaptedFormula = origF.replace(new RegExp(`([A-Z]+)${origR}`, 'g'), `$1${currNextRow}`);
+              const fElem = doc.createElementNS('http://schemas.openxmlformats.org/spreadsheetml/2006/main', 'f');
+              fElem.textContent = adaptedFormula;
+              cellElem.appendChild(fElem);
+
+              // Valor estimado calculado
+              const vElem = doc.createElementNS('http://schemas.openxmlformats.org/spreadsheetml/2006/main', 'v');
+              const estVal = Number(it.suggested_bill_amt || it.suggested_total_cost || 0);
+              vElem.textContent = String(estVal);
+              cellElem.appendChild(vElem);
+            } else {
+              // Valores directos
+              let cellVal = null;
+              let isNum = false;
+
+              if (hText.includes('REF/INV')) cellVal = it.ref_no || '';
+              else if (hText === 'CUSTOMER') cellVal = it.customer || '';
+              else if (hText === 'CUSTOMER FOR') cellVal = it.customer_for || '';
+              else if (hText === 'CONTAINER') cellVal = it.container || '';
+              else if (hText === 'ETD') cellVal = it.etd || '';
+              else if (hText === 'ETA') cellVal = it.update_eta || it.eta || '';
+              else if (hText === 'SHIPPING LINE') cellVal = it.shipping_line || '';
+              else if (hText === 'POL') cellVal = it.pol || '';
+              else if (hText === 'POD') cellVal = it.pod || '';
+              else if (hText === 'TOTAL COST') { cellVal = Number(it.suggested_total_cost || 0); isNum = true; }
+              else if (hText.includes('RAIL')) { cellVal = Number(it.suggested_rail || 0); isNum = true; }
+              else if (hText.includes('PREVIO') && hText.includes('INSURANCE')) {
+                cellVal = Number(it.suggested_previo_ins_comb ?? ((it.suggested_previo || 0) + (it.suggested_insurance || 0)));
+                isNum = true;
+              } else if (hText.includes('PREVIO')) { cellVal = Number(it.suggested_previo || 0); isNum = true; }
+              else if (hText.includes('INSURANCE')) {
+                const hasSep = Object.values(hdrs).includes('PREVIO') && Object.values(hdrs).includes('INSURANCE');
+                cellVal = Number(hasSep ? (it.suggested_insurance || 0) : (it.suggested_previo_ins_comb ?? ((it.suggested_previo || 0) + (it.suggested_insurance || 0))));
+                isNum = true;
+              } else if (hText.includes('EXW') && !hText.includes('AMEND')) { cellVal = Number(it.suggested_exw_only ?? it.exw ?? 0); isNum = true; }
+              else if (hText.includes('AMEND') && !hText.includes('EXW')) { cellVal = Number(it.suggested_amend_only ?? it.amend ?? 0); isNum = true; }
+              else if (hText.includes('EXW') || hText.includes('AMEND') || hText.includes('OTHER COST')) {
+                cellVal = Number(it.suggested_exw_amend || 0);
+                isNum = true;
+              } else if (hText === 'BILL AMT') {
+                cellVal = Number(it.suggested_bill_amt || it.suggested_total_cost || 0);
+                isNum = true;
+              }
+
+              if (cellVal !== null && cellVal !== undefined) {
+                const vElem = doc.createElementNS('http://schemas.openxmlformats.org/spreadsheetml/2006/main', 'v');
+                if (isNum) {
+                  vElem.textContent = String(cellVal);
+                } else {
+                  // Textos directos mediante inlineStr para no corromper la tabla de strings compartidos
+                  cellElem.setAttribute('t', 'inlineStr');
+                  const isElem = doc.createElementNS('http://schemas.openxmlformats.org/spreadsheetml/2006/main', 'is');
+                  const tElem = doc.createElementNS('http://schemas.openxmlformats.org/spreadsheetml/2006/main', 't');
+                  tElem.textContent = String(cellVal);
+                  isElem.appendChild(tElem);
+                  cellElem.appendChild(isElem);
+                }
+                if (isNum) cellElem.appendChild(vElem);
+              }
+            }
+
+            newRowElem.appendChild(cellElem);
+          }
+
+          sheetData.appendChild(newRowElem);
+          currNextRow++;
+        }
+      }
+
+      // Guardar el XML modificado dentro del ZIP
+      const newXmlText = serializer.serializeToString(doc);
+      zip.file(sheetPath, newXmlText);
     }
-    XLSX.writeFile(wb, `CONCENTRADO ML LOGISTICS ELIEZER 2026 (${new Date().toISOString().slice(0, 10)}).xlsx`);
-    showToast('✅ Concentrado descargado con todas las referencias y reglas aplicadas');
+
+    // 3. Generar el nuevo archivo XLSX intacto y descargarlo
+    const blob = await zip.generateAsync({
+      type: 'blob',
+      mimeType: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+      compression: 'DEFLATE',
+      compressionOptions: { level: 6 }
+    });
+
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = `CONCENTRADO ML LOGISTICS ELIEZER 2026 (${new Date().toISOString().slice(0, 10)}).xlsx`;
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+    setTimeout(() => URL.revokeObjectURL(url), 10000);
+
+    showToast('✅ Concentrado descargado con las referencias añadidas, azules actualizados y amarillos 100% protegidos');
   } catch (err) {
+    console.error(err);
+    alert('Error al generar el Concentrado: ' + err.message);
+  }
+}
     console.error(err);
     alert('Error al generar el Excel en el navegador: ' + err.message);
   }
