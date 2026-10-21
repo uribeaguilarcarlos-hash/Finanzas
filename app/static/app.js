@@ -2148,10 +2148,6 @@ async function downloadConcentradoFile() {
     alert('Error al generar el Concentrado: ' + err.message);
   }
 }
-    console.error(err);
-    alert('Error al generar el Excel en el navegador: ' + err.message);
-  }
-}
 
 // ================= REVIEW / APPROVAL ACTIONS =================
 async function toggleReviewItem(changeKey, changeType, refNo, newStatus) {
