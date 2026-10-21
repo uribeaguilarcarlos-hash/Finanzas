@@ -1607,6 +1607,38 @@ def download_concentrado():
     )
 
 
+@app.delete("/api/statements/{raw_date}")
+def delete_statement(raw_date: str):
+    conn = get_db()
+    cur = conn.cursor()
+    stmt = cur.execute("SELECT filename FROM statements WHERE raw_date = ?", (raw_date,)).fetchone()
+    if not stmt:
+        conn.close()
+        raise HTTPException(status_code=404, detail=f"No se encontró el Statement con fecha {raw_date}")
+
+    filename = stmt["filename"]
+    # Borrar registros de base de datos
+    cur.execute("DELETE FROM master_items WHERE raw_date = ?", (raw_date,))
+    cur.execute("DELETE FROM accounting_payments WHERE raw_date = ?", (raw_date,))
+    cur.execute("DELETE FROM accounting_customer_costs WHERE raw_date = ?", (raw_date,))
+    cur.execute("DELETE FROM review_status WHERE raw_date = ?", (raw_date,))
+    cur.execute("DELETE FROM statements WHERE raw_date = ?", (raw_date,))
+    conn.commit()
+    conn.close()
+
+    # Si el archivo Excel físico existe en la carpeta, moverlo a una subcarpeta 'trash' o eliminarlo
+    target_file = WORKSPACE_DIR / filename
+    if target_file.exists():
+        trash_dir = WORKSPACE_DIR / "trash"
+        trash_dir.mkdir(exist_ok=True)
+        try:
+            shutil.move(str(target_file), str(trash_dir / f"{datetime.now().strftime('%Y%m%d_%H%M%S')}_{filename}"))
+        except Exception:
+            pass
+
+    return {"ok": True, "raw_date": raw_date, "message": f"Statement {raw_date} eliminado correctamente"}
+
+
 app.mount("/static", StaticFiles(directory=str(STATIC_DIR)), name="static")
 
 

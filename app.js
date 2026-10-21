@@ -2205,6 +2205,54 @@ async function syncOneDriveFolder() {
   }
 }
 
+async function deleteCurrentStatement() {
+  if (!state.activeRawDate) return;
+  const curr = state.statements.find(s => s.raw_date === state.activeRawDate);
+  const name = curr ? curr.filename : state.activeRawDate;
+
+  if (!confirm(`¿Estás seguro de que deseas borrar el Statement "${name}" (${state.activeRawDate})?`)) {
+    return;
+  }
+
+  showToast(`⏳ Eliminando Statement ${state.activeRawDate}...`);
+
+  if (!state.isStaticMode) {
+    try {
+      const res = await fetch(`/api/statements/${encodeURIComponent(state.activeRawDate)}`, {
+        method: 'DELETE',
+      });
+      const data = await res.json();
+      if (!res.ok) {
+        alert(data.detail || 'Error al eliminar el Statement');
+        return;
+      }
+      showToast(`🗑️ ${data.message || 'Statement eliminado correctamente'}`);
+      // Seleccionar el siguiente disponible
+      state.statements = state.statements.filter(s => s.raw_date !== state.activeRawDate);
+      state.activeRawDate = state.statements[0]?.raw_date || null;
+      await loadStatementsList(state.activeRawDate);
+    } catch (err) {
+      alert('Error al eliminar: ' + err.message);
+    }
+  } else {
+    // Modo estático (Azure Static Web App / LocalStorage)
+    const raw = state.activeRawDate;
+    try {
+      localStorage.removeItem(`ml_custom_detail_${raw}`);
+      const customList = JSON.parse(localStorage.getItem('ml_custom_stmts_v1') || '[]').filter(s => s.raw_date !== raw);
+      localStorage.setItem('ml_custom_stmts_v1', JSON.stringify(customList));
+    } catch (e) {
+      console.warn(e);
+    }
+
+    delete state.staticDetailsCache[raw];
+    state.statements = state.statements.filter(s => s.raw_date !== raw);
+    state.activeRawDate = state.statements[0]?.raw_date || null;
+    showToast(`🗑️ Statement ${raw} eliminado de la sesión actual`);
+    await loadStatementsList(state.activeRawDate);
+  }
+}
+
 // ================= TAB NAVIGATION =================
 function switchTab(tabName) {
   state.activeTab = tabName;
