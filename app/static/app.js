@@ -341,6 +341,7 @@ async function computeClientSideDiff(currRawDate, compRawDate) {
         delta_total_cost: dTotal,
         combined_delta: comb,
         field_diffs: fDiffs,
+        diffs: fDiffs,
         current_item: m,
         previous_item: p,
         review_status: 'pending',
@@ -686,13 +687,14 @@ function renderDashboard() {
 
   diff.cost_changes.forEach(c => {
     const isRev = c.review_status === 'reviewed';
+    const diffList = c.diffs || c.field_diffs || [];
     alertCards.push(`
       <div class="alert-item" onclick="openRefHistory('${esc(c.ref_no)}')">
         <div class="alert-item-icon">${isRev ? '✅' : '⚠️'}</div>
         <div style="flex:1; min-width:0;">
           <div class="alert-item-title">${esc(c.ref_no)} · ${esc(c.customer_for)}</div>
           <div class="alert-item-desc">
-            ${c.diffs.map(d => `${esc(d.label)}: ${fmtMoney(d.old)} → <strong>${fmtMoney(d.new)}</strong>`).join(' | ')}
+            ${diffList.map(d => `${esc(d.label)}: ${fmtMoney(d.old)} → <strong>${fmtMoney(d.new)}</strong>`).join(' | ')}
           </div>
         </div>
       </div>
@@ -743,7 +745,8 @@ function renderDashboard() {
 
 function renderCostChangeRow(c) {
   const isRev = c.review_status === 'reviewed';
-  const chips = c.diffs
+  const diffList = c.diffs || c.field_diffs || [];
+  const chips = diffList
     .map(d => {
       const sign = d.delta > 0 ? '+' : '';
       const cls = d.delta > 0 ? 'delta-pos' : 'delta-neg';
