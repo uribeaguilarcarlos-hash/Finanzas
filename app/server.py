@@ -1514,10 +1514,28 @@ def apply_concentrado_fixes(req: ApplyConcentradoFixesRequest):
             while ws.cell(row=next_row, column=1).value is not None and str(ws.cell(row=next_row, column=1).value).strip() != "":
                 next_row += 1
 
+            # Blanquear filas previas que estaban en azul (dejando intactas las amarillas de anticipos/pagos)
+            white_fill = PatternFill(fill_type=None)
+            default_font = Font(color="000000", bold=False)
+            for prev_r in range(3, next_row):
+                c_test = ws.cell(row=prev_r, column=1)
+                if c_test.value and c_test.fill and c_test.fill.fill_type:
+                    fg = c_test.fill.fgColor
+                    is_blue = (
+                        getattr(fg, "theme", None) == 7 or
+                        str(getattr(fg, "rgb", "")).upper() in ("FFD9E1F2", "D9E1F2", "FFB4C6E7", "B4C6E7") or
+                        str(getattr(fg, "value", "")).upper() in ("7", "D9E1F2")
+                    )
+                    if is_blue:
+                        for col_k in range(1, len(hdr_row) + 1):
+                            cell_to_clear = ws.cell(row=prev_r, column=col_k)
+                            cell_to_clear.fill = white_fill
+                            cell_to_clear.font = default_font
+
             has_sep_prev_ins = ("PREVIO" in hdr_row and "INSURANCE" in hdr_row)
             has_sep_exw_amend = (any("EXW" in h for h in hdr_row if h) and any("AMEND" in h for h in hdr_row if h))
 
-            # Openpyxl style for highlighting new references in blue
+            # Openpyxl style for highlighting new references in blue (Theme 7 tint 0.8 / #D9E1F2)
             blue_fill = PatternFill(start_color="D9E1F2", end_color="D9E1F2", fill_type="solid")
             blue_font = Font(color="1F497D", bold=True)
 

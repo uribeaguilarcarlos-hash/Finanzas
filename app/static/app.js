@@ -1478,8 +1478,8 @@ function renderConcentradoView() {
               <th>Container</th>
               <th>Costo Eliezer</th>
               <th>BILL AMT (Stmt)</th>
-              <th>Regla Aplicada en Hoja</th>
-              <th>TOTAL COST (Conc.)</th>
+              <th>Regla Sugerida</th>
+              <th style="min-width:130px;">TOTAL COST (Editable)</th>
               <th>Rail</th>
               <th>Previo + Seg</th>
               <th>EXW / Amend</th>
@@ -1497,11 +1497,23 @@ function renderConcentradoView() {
                 <td>${fmtMoney(m.total_cost)}</td>
                 <td>${m.stmt_bill_amt ? `<strong>${fmtMoney(m.stmt_bill_amt)}</strong>` : '<span style="color:var(--text-muted)">Vacío (Comercial)</span>'}</td>
                 <td><span class="diff-chip">${esc(m.formula_label || 'Redondeo múltiplo $50 (+350)')}</span></td>
-                <td style="color:var(--green-text); font-weight:800;">${fmtMoney(m.suggested_total_cost)}</td>
+                <td>
+                  <div style="display:flex; align-items:center; gap:4px;">
+                    <span style="font-weight:700; color:var(--text-secondary); font-size:12px;">$</span>
+                    <input
+                      type="number"
+                      step="50"
+                      id="edit-total-cost-${idx}"
+                      value="${m.suggested_total_cost}"
+                      style="width:95px; padding:4px 6px; font-weight:800; font-size:13px; color:var(--green-text); border:1.5px solid var(--border-warm); border-radius:6px; background:#FFFFFF; text-align:right;"
+                      oninput="onEditMissingTotalCost(${idx}, this.value)"
+                    />
+                  </div>
+                </td>
                 <td>${fmtMoney(m.suggested_rail)}</td>
                 <td>${fmtMoney((m.suggested_previo || 0) + (m.suggested_insurance || 0))}</td>
                 <td>${fmtMoney(m.suggested_exw_amend)}</td>
-                <td><strong>${fmtMoney(m.suggested_bill_amt || ((m.suggested_total_cost || 0) + (m.suggested_rail || 0) + (m.suggested_previo || 0) + (m.suggested_insurance || 0) + (m.suggested_exw_amend || 0)))}</strong></td>
+                <td><strong id="missing-bill-amt-${idx}">${fmtMoney(m.suggested_bill_amt || ((m.suggested_total_cost || 0) + (m.suggested_rail || 0) + (m.suggested_previo || 0) + (m.suggested_insurance || 0) + (m.suggested_exw_amend || 0)))}</strong></td>
                 <td>
                   <button class="btn-gold" style="padding:5px 10px; font-size:11.5px;" onclick="insertSingleMissingToConcentrado(${idx})">
                     ➕ Insertar en ${esc(m.target_sheet)}
@@ -1638,6 +1650,19 @@ async function applyAllConcentradoFixes() {
   await sendConcentradoActions(actions, `✅ Se aplicaron ${actions.length} correcciones en el archivo Concentrado`);
 }
 
+function onEditMissingTotalCost(idx, val) {
+  const m = state.concentrado?.missing_in_concentrado?.[idx];
+  if (!m) return;
+  const num = parseFloat(val) || 0;
+  m.suggested_total_cost = num;
+  m.suggested_bill_amt = num + (m.suggested_rail || 0) + (m.suggested_previo || 0) + (m.suggested_insurance || 0) + (m.suggested_exw_amend || 0);
+
+  const billEl = document.getElementById(`missing-bill-amt-${idx}`);
+  if (billEl) {
+    billEl.textContent = fmtMoney(m.suggested_bill_amt);
+  }
+}
+
 async function insertSingleMissingToConcentrado(idx) {
   const m = state.concentrado?.missing_in_concentrado?.[idx];
   if (!m) return;
@@ -1742,6 +1767,23 @@ async function downloadConcentradoFile() {
           if (!cA || cA.v === undefined || cA.v === null || String(cA.v).trim() === '') break;
           nextR++;
         }
+
+        // Poner en fondo blanco las referencias previas que tenían azul (preservando las amarillas)
+        for (let prevR = 2; prevR < nextR; prevR++) {
+          const cellA = ws[XLSX.utils.encode_cell({ r: prevR, c: 0 })];
+          if (cellA && cellA.s && cellA.s.fill && cellA.s.fill.fgColor) {
+            const rgb = String(cellA.s.fill.fgColor.rgb || '').toUpperCase();
+            if (rgb === 'D9E1F2' || rgb === 'FFD9E1F2' || rgb === 'B4C6E7' || rgb === 'FFB4C6E7') {
+              for (let colK = 0; colK < hdrRow.length; colK++) {
+                const cellK = ws[XLSX.utils.encode_cell({ r: prevR, c: colK })];
+                if (cellK) {
+                  delete cellK.s;
+                }
+              }
+            }
+          }
+        }
+
         const excelRow = nextR + 1;
         const hasSepPrevIns = hdrRow.includes('PREVIO') && hdrRow.includes('INSURANCE');
         const hasSepExwAmend = hdrRow.some(h => h.includes('EXW')) && hdrRow.some(h => h.includes('AMEND'));
