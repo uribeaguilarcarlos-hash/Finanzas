@@ -11,7 +11,7 @@ from pathlib import Path
 from typing import Optional, List, Dict, Any
 
 import openpyxl
-from openpyxl.styles import PatternFill, Font
+from openpyxl.styles import PatternFill, Font, Color
 from fastapi import FastAPI, UploadFile, File, Form, HTTPException, Query
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import FileResponse, JSONResponse
@@ -1535,8 +1535,9 @@ def apply_concentrado_fixes(req: ApplyConcentradoFixesRequest):
             has_sep_prev_ins = ("PREVIO" in hdr_row and "INSURANCE" in hdr_row)
             has_sep_exw_amend = (any("EXW" in h for h in hdr_row if h) and any("AMEND" in h for h in hdr_row if h))
 
-            # Openpyxl style for highlighting new references in blue (Theme 7 tint 0.8 / #D9E1F2)
-            blue_fill = PatternFill(start_color="D9E1F2", end_color="D9E1F2", fill_type="solid")
+            # Estilo Theme 7 tint 0.8 idéntico al de tus Concentrados originales
+            blue_color = Color(theme=7, tint=0.7999816888943144)
+            blue_fill = PatternFill(patternType="solid", fgColor=blue_color)
             blue_font = Font(color="1F497D", bold=True)
 
             for col_i, h in enumerate(hdr_row, start=1):
@@ -1610,6 +1611,127 @@ def apply_concentrado_fixes(req: ApplyConcentradoFixesRequest):
         )
     wb.close()
     return {"ok": True, "applied": applied_count}
+
+
+@app.post("/api/concentrado/download-custom")
+def download_custom_concentrado(req: ApplyConcentradoFixesRequest):
+    if not CONCENTRADO_PATH.exists():
+        raise HTTPException(status_code=404, detail="Archivo Concentrado no encontrado")
+
+    try:
+        wb = openpyxl.load_workbook(str(CONCENTRADO_PATH))
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Error al abrir Concentrado: {str(e)}")
+
+    for act in req.actions:
+        if act.sheet not in wb.sheetnames:
+            continue
+        ws = wb[act.sheet]
+        hdr_row = [str(ws.cell(row=2, column=c).value or "").strip().upper() for c in range(1, 25)]
+
+        if act.type == "SET_CELL" and act.row and act.col_header:
+            target_col_idx = next((i + 1 for i, h in enumerate(hdr_row) if h == act.col_header.strip().upper()), None)
+            if target_col_idx:
+                ws.cell(row=act.row, column=target_col_idx, value=act.new_value)
+
+        elif act.type == "INSERT_REF" and act.item:
+            it = act.item
+            next_row = 3
+            while ws.cell(row=next_row, column=1).value is not None and str(ws.cell(row=next_row, column=1).value).strip() != "":
+                next_row += 1
+
+            # Blanquear filas previas que estaban en azul (dejando intactas las amarillas de anticipos/pagos)
+            white_fill = PatternFill(fill_type=None)
+            default_font = Font(color="000000", bold=False)
+            for prev_r in range(3, next_row):
+                c_test = ws.cell(row=prev_r, column=1)
+                if c_test.value and c_test.fill and c_test.fill.fill_type:
+                    fg = c_test.fill.fgColor
+                    is_blue = (
+                        getattr(fg, "theme", None) == 7 or
+                        str(getattr(fg, "rgb", "")).upper() in ("FFD9E1F2", "D9E1F2", "FFB4C6E7", "B4C6E7") or
+                        str(getattr(fg, "value", "")).upper() in ("7", "D9E1F2")
+                    )
+                    if is_blue:
+                        for col_k in range(1, len(hdr_row) + 1):
+                            cell_to_clear = ws.cell(row=prev_r, column=col_k)
+                            cell_to_clear.fill = white_fill
+                            cell_to_clear.font = default_font
+
+            has_sep_prev_ins = ("PREVIO" in hdr_row and "INSURANCE" in hdr_row)
+            has_sep_exw_amend = (any("EXW" in h for h in hdr_row if h) and any("AMEND" in h for h in hdr_row if h))
+
+            blue_color = Color(theme=7, tint=0.7999816888943144)
+            blue_fill = PatternFill(patternType="solid", fgColor=blue_color)
+            blue_font = Font(color="1F497D", bold=True)
+
+            for col_i, h in enumerate(hdr_row, start=1):
+                if not h:
+                    continue
+                cell = ws.cell(row=next_row, column=col_i)
+                cell.fill = blue_fill
+                cell.font = blue_font
+
+                if "REF/INV" in h:
+                    cell.value = it.get("ref_no")
+                elif h == "CUSTOMER":
+                    cell.value = it.get("customer")
+                elif h == "CUSTOMER FOR":
+                    cell.value = it.get("customer_for")
+                elif h == "CONTAINER":
+                    cell.value = it.get("container")
+                elif h == "ETD":
+                    cell.value = it.get("etd")
+                elif h == "ETA":
+                    cell.value = it.get("update_eta") or it.get("eta")
+                elif h == "SHIPPING LINE":
+                    cell.value = it.get("shipping_line")
+                elif h == "POL":
+                    cell.value = it.get("pol")
+                elif h == "POD":
+                    cell.value = it.get("pod")
+                elif h == "TOTAL COST":
+                    cell.value = it.get("suggested_total_cost", 0.0)
+                elif "RAIL" in h:
+                    cell.value = it.get("suggested_rail", 0.0)
+                elif "PREVIO" in h and "INSURANCE" in h:
+                    cell.value = it.get("suggested_previo_ins_comb", (it.get("suggested_previo", 0.0) + it.get("suggested_insurance", 0.0)))
+                elif "PREVIO" in h:
+                    cell.value = it.get("suggested_previo", 0.0)
+                elif "INSURANCE" in h:
+                    if has_sep_prev_ins:
+                        cell.value = it.get("suggested_insurance", 0.0)
+                    else:
+                        cell.value = it.get("suggested_previo_ins_comb", (it.get("suggested_previo", 0.0) + it.get("suggested_insurance", 0.0)))
+                elif "EXW" in h and "AMEND" not in h and has_sep_exw_amend:
+                    cell.value = it.get("suggested_exw_only", it.get("exw", 0.0))
+                elif "AMEND" in h and "EXW" not in h and has_sep_exw_amend:
+                    cell.value = it.get("suggested_amend_only", it.get("amend", 0.0))
+                elif "EXW" in h or "AMEND" in h or "OTHER COST" in h:
+                    cell.value = it.get("suggested_exw_amend", 0.0)
+                elif "DETENTION" in h:
+                    cell.value = it.get("suggested_detention", it.get("demurrage", 0.0))
+                elif h == "BILL AMT":
+                    formula_copied = False
+                    for search_r in range(next_row - 1, 2, -1):
+                        prev_formula = ws.cell(row=search_r, column=col_i).value
+                        if isinstance(prev_formula, str) and prev_formula.startswith("="):
+                            new_f = re.sub(rf"\b([A-Z]+){search_r}\b", rf"\g<1>{next_row}", prev_formula)
+                            cell.value = new_f
+                            formula_copied = True
+                            break
+                    if not formula_copied:
+                        cell.value = it.get("suggested_bill_amt", it.get("suggested_total_cost", 0.0))
+
+    tmp_dl = Path(tempfile.gettempdir()) / f"CONCENTRADO_ML_LOGISTICS_ELIEZER_2026_{datetime.now().strftime('%Y%m%d_%H%M%S')}.xlsx"
+    wb.save(str(tmp_dl))
+    wb.close()
+
+    return FileResponse(
+        path=str(tmp_dl),
+        filename=f"CONCENTRADO ML LOGISTICS ELIEZER 2026 ({datetime.now().strftime('%Y-%m-%d')}).xlsx",
+        media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+    )
 
 
 @app.get("/api/concentrado/download")

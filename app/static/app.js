@@ -448,6 +448,10 @@ async function refreshActiveStatementData() {
         concData = JSON.parse(JSON.stringify(baseConc));
         concData.raw_date = state.activeRawDate;
 
+        // Cargar referencias aplicadas y desestimadas guardadas en localStorage
+        const dismissedSet = new Set(JSON.parse(localStorage.getItem('ml_dismissed_refs_v1') || '[]'));
+        const appliedSet = new Set(JSON.parse(localStorage.getItem('ml_applied_refs_v1') || '[]'));
+
         // Recolectar todas las referencias ya existentes en las hojas del Concentrado y en el Statement base
         const baseRefs = new Set();
         const baseStmtDetail = await getStaticDetail(knownBaseRaw);
@@ -461,6 +465,10 @@ async function refreshActiveStatementData() {
           const rUp = String(m.ref_no || '').trim().toUpperCase();
           if (rUp && !baseRefs.has(rUp)) {
             const targetSheet = guessConcentradoSheetClient(m, concData.sheet_distribution);
+            const key = `${targetSheet}:${m.ref_no}`;
+            // Si ya fue aplicada o desestimada por el usuario, no volver a mostrarla como pendiente
+            if (dismissedSet.has(key) || appliedSet.has(key)) return;
+
             const sheetMeta = (concData.sheet_distribution || []).find(s => s.sheet === targetSheet);
             const calc = computeConcentradoTargetClient(m, targetSheet, sheetMeta);
             newMissing.push({
@@ -1467,9 +1475,14 @@ function renderConcentradoView() {
             Si el Statement trae <code>BILL AMT</code> se usa como base para <strong>TOTAL COST</strong>; si viene vacío se calcula <strong>Costo + $350 redondeado al múltiplo de $50 superior</strong> y se respeta si la pestaña une o separa Previo ($180) y Seguro ($100).
           </p>
         </div>
-        <button class="btn-gold" onclick="insertAllMissingToConcentrado()">
-          ➕ Insertar Todas (${conc.missing_in_concentrado.length}) en el Concentrado
-        </button>
+        <div style="display:flex; gap:8px;">
+          <button class="btn-soft" style="font-size:12px; color:var(--text-muted);" onclick="dismissAllMissing()" title="Desestimar todas las referencias pendientes">
+            ✕ Desestimar Todas
+          </button>
+          <button class="btn-gold" onclick="insertAllMissingToConcentrado()">
+            ➕ Insertar Todas (${conc.missing_in_concentrado.length}) en el Concentrado
+          </button>
+        </div>
       </div>
       <div class="table-wrap">
         <table class="ml-table">
@@ -1518,9 +1531,14 @@ function renderConcentradoView() {
                 <td>${fmtMoney(m.suggested_exw_amend)}</td>
                 <td><strong id="missing-bill-amt-${idx}">${fmtMoney(m.suggested_bill_amt || ((m.suggested_total_cost || 0) + (m.suggested_rail || 0) + (m.suggested_previo || 0) + (m.suggested_insurance || 0) + (m.suggested_exw_amend || 0)))}</strong></td>
                 <td>
-                  <button class="btn-gold" style="padding:5px 10px; font-size:11.5px;" onclick="insertSingleMissingToConcentrado(${idx})">
-                    ➕ Insertar en ${esc(m.target_sheet)}
-                  </button>
+                  <div style="display:flex; gap:6px; align-items:center;">
+                    <button class="btn-gold" style="padding:5px 9px; font-size:11.5px; white-space:nowrap;" onclick="insertSingleMissingToConcentrado(${idx})" title="Insertar en la hoja ${esc(m.target_sheet)}">
+                      ➕ Insertar
+                    </button>
+                    <button class="btn-soft" style="padding:5px 8px; font-size:11px; color:var(--text-muted); border-color:var(--border-warm); white-space:nowrap;" onclick="dismissSingleMissing(${idx})" title="Desestimar / Desechar esta referencia para que no se inserte">
+                      ✕ Descartar
+                    </button>
+                  </div>
                 </td>
               </tr>
             `).join('')}
@@ -1666,6 +1684,43 @@ function onEditMissingTotalCost(idx, val) {
   }
 }
 
+function dismissSingleMissing(idx) {
+  const m = state.concentrado?.missing_in_concentrado?.[idx];
+  if (!m) return;
+  const key = `${m.target_sheet}:${m.ref_no}`;
+  state.dismissedMissingRefs = state.dismissedMissingRefs || new Set(JSON.parse(localStorage.getItem('ml_dismissed_refs_v1') || '[]'));
+  state.dismissedMissingRefs.add(key);
+  try {
+    localStorage.setItem('ml_dismissed_refs_v1', JSON.stringify(Array.from(state.dismissedMissingRefs)));
+  } catch (e) {}
+
+  state.concentrado.missing_in_concentrado = (state.concentrado.missing_in_concentrado || []).filter(
+    x => `${x.target_sheet}:${x.ref_no}` !== key
+  );
+  state.concentrado.summary.missing_refs_count = state.concentrado.missing_in_concentrado.length;
+  showToast(`✕ Referencia ${m.ref_no} desestimada`);
+  renderConcentradoView();
+  renderDashboard();
+}
+
+function dismissAllMissing() {
+  const list = state.concentrado?.missing_in_concentrado || [];
+  if (!list.length) return;
+  if (!confirm(`¿Deseas desestimar las ${list.length} referencias para que no se inserten en el Concentrado?`)) return;
+
+  state.dismissedMissingRefs = state.dismissedMissingRefs || new Set(JSON.parse(localStorage.getItem('ml_dismissed_refs_v1') || '[]'));
+  list.forEach(m => state.dismissedMissingRefs.add(`${m.target_sheet}:${m.ref_no}`));
+  try {
+    localStorage.setItem('ml_dismissed_refs_v1', JSON.stringify(Array.from(state.dismissedMissingRefs)));
+  } catch (e) {}
+
+  state.concentrado.missing_in_concentrado = [];
+  state.concentrado.summary.missing_refs_count = 0;
+  showToast(`✕ Se desestimaron las ${list.length} referencias`);
+  renderConcentradoView();
+  renderDashboard();
+}
+
 async function insertSingleMissingToConcentrado(idx) {
   const m = state.concentrado?.missing_in_concentrado?.[idx];
   if (!m) return;
@@ -1706,6 +1761,22 @@ async function sendConcentradoActions(actions, successMsg) {
   } else {
     state.pendingStaticConcentradoActions = (state.pendingStaticConcentradoActions || []).concat(actions);
     const fixedRefs = new Set(actions.map(a => `${a.sheet}:${a.ref_no}`));
+
+    // Guardar en localStorage para que persista tras refrescar la página
+    try {
+      const appliedList = JSON.parse(localStorage.getItem('ml_applied_refs_v1') || '[]');
+      const appliedSet = new Set(appliedList);
+      actions.forEach(a => {
+        if (a.sheet && a.ref_no) appliedSet.add(`${a.sheet}:${a.ref_no}`);
+      });
+      localStorage.setItem('ml_applied_refs_v1', JSON.stringify(Array.from(appliedSet)));
+
+      // También guardar las acciones pendientes acumuladas
+      const storedPending = JSON.parse(localStorage.getItem('ml_pending_actions_v1') || '[]');
+      const combined = storedPending.concat(actions);
+      localStorage.setItem('ml_pending_actions_v1', JSON.stringify(combined));
+    } catch (e) {}
+
     if (state.concentrado) {
       state.concentrado.discrepancies = (state.concentrado.discrepancies || []).filter(
         d => !fixedRefs.has(`${d.sheet}:${d.ref_no}`)
