@@ -605,9 +605,13 @@
                 Reglas activas de negocio: <strong>Tren (Rail)</strong> comercial en $1,700 / $1,850 no se marca como error de monto · <strong>Previo</strong> evaluado en <strong>$180</strong> ($200 en JAZ) + <strong>Seguro $100</strong> (sumados o separados según la pestaña).
               </p>
             </div>
-            <div style="display:flex; gap:10px; flex-wrap:wrap;">
+            <div style="display:flex; gap:10px; flex-wrap:wrap; align-items:center;">
+              <input type="file" id="upload-concentrado-input" accept=".xlsx" style="display:none;" onchange="handleUploadNewConcentrado(event)" />
+              <button class="btn-soft" onclick="document.getElementById('upload-concentrado-input').click()" title="Subir una nueva versión de tu Concentrado con ajustes manuales para que se vuelva la nueva ley">
+                📤 Subir Concentrado (Hacer Ley)
+              </button>
               <button class="btn-soft" onclick="loadConcentradoOverview()">
-                🔄 Re-analizar Concentrado
+                🔄 Re-analizar
               </button>
               <button class="btn-gold" onclick="downloadConcentradoFile()">
                 ⬇️ Descargar Concentrado (.xlsx)

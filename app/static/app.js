@@ -1743,6 +1743,132 @@ async function insertAllMissingToConcentrado() {
   await sendConcentradoActions(actions, `✅ Se insertaron ${actions.length} referencias nuevas en el Concentrado`);
 }
 
+async function handleUploadNewConcentrado(event) {
+  const file = event.target.files?.[0];
+  if (!file) return;
+
+  if (!file.name.toLowerCase().endsWith('.xlsx')) {
+    alert('Por favor selecciona un archivo Excel (.xlsx)');
+    event.target.value = '';
+    return;
+  }
+
+  const confirmMsg = `¿Deseas subir "${file.name}" y establecerlo como la NUEVA LEY del Concentrado?\n\nEsto actualizará todas las hojas, saldos y referencias base.`;
+  if (!confirm(confirmMsg)) {
+    event.target.value = '';
+    return;
+  }
+
+  showToast('⏳ Procesando y analizando el nuevo Concentrado...');
+
+  if (!state.isStaticMode) {
+    try {
+      const formData = new FormData();
+      formData.append('file', file);
+      const resp = await fetch('/api/concentrado/upload', {
+        method: 'POST',
+        body: formData,
+      });
+      const data = await resp.json();
+      if (!resp.ok) {
+        throw new Error(data.detail || 'Error al subir el archivo');
+      }
+      showToast('✅ Nuevo Concentrado guardado y establecido como ley');
+      await loadConcentradoOverview();
+    } catch (err) {
+      alert('Error: ' + err.message);
+    }
+  } else {
+    // Modo Azure Static Web App: procesar con SheetJS en el navegador
+    try {
+      const reader = new FileReader();
+      reader.onload = async function(e) {
+        try {
+          const data = new Uint8Array(e.target.result);
+          if (typeof XLSX === 'undefined') {
+            throw new Error('La librería SheetJS no está disponible');
+          }
+          const wb = XLSX.read(data, { type: 'array', cellDates: true });
+
+          // 1. Limpiar referencias aplicadas / pendientes previas porque este nuevo archivo ya es ley
+          localStorage.removeItem('ml_applied_refs_v1');
+          localStorage.removeItem('ml_dismissed_refs_v1');
+          localStorage.removeItem('ml_pending_actions_v1');
+          state.pendingStaticConcentradoActions = [];
+
+          // 2. Extraer todas las referencias del nuevo Concentrado
+          const concRefs = new Set();
+          wb.SheetNames.forEach(sName => {
+            if (sName === 'CUENTA GENERAL') return;
+            const ws = wb.Sheets[sName];
+            if (!ws || !ws['!ref']) return;
+            const range = XLSX.utils.decode_range(ws['!ref']);
+            for (let R = 2; R <= range.e.r; ++R) {
+              const cell = ws[XLSX.utils.encode_cell({ r: R, c: 0 })];
+              if (cell && cell.v !== undefined && cell.v !== null && String(cell.v).trim() !== '') {
+                concRefs.add(String(cell.v).trim().toUpperCase());
+              }
+            }
+          });
+
+          // 3. Recalcular las referencias faltantes del Statement actual contra este nuevo Concentrado
+          if (state.concentrado) {
+            state.concentrado.filename = file.name;
+            const currentItems = state.currentDetail?.master_items || [];
+            const newMissing = [];
+
+            currentItems.forEach(m => {
+              const rUp = String(m.ref_no || '').trim().toUpperCase();
+              if (rUp && !concRefs.has(rUp)) {
+                const targetSheet = guessConcentradoSheetClient(m, state.concentrado.sheet_distribution);
+                const sheetMeta = (state.concentrado.sheet_distribution || []).find(s => s.sheet === targetSheet);
+                const calc = computeConcentradoTargetClient(m, targetSheet, sheetMeta);
+                newMissing.push({
+                  ref_no: m.ref_no,
+                  customer: m.customer,
+                  customer_for: m.customer_for,
+                  container: m.container,
+                  etd: m.etd,
+                  eta: m.eta,
+                  update_eta: m.update_eta,
+                  shipping_line: m.shipping_line,
+                  pol: m.pol,
+                  pod: m.pod,
+                  sea_freight: m.sea_freight,
+                  fob_cost: m.fob_cost,
+                  inland_fee: m.inland_fee,
+                  total_cost: m.total_cost,
+                  previo: m.previo,
+                  insurance: m.insurance,
+                  exw: m.exw_fee,
+                  amend: m.amend_fee,
+                  target_sheet: targetSheet,
+                  ...calc,
+                });
+              }
+            });
+
+            state.concentrado.missing_in_concentrado = newMissing;
+            state.concentrado.summary.missing_refs_count = newMissing.length;
+          }
+
+          showToast(`✅ "${file.name}" cargado y establecido como Ley (${concRefs.size} referencias leídas)`);
+          renderConcentradoView();
+          renderDashboard();
+        } catch (parseErr) {
+          console.error(parseErr);
+          alert('Error al leer el archivo Excel: ' + parseErr.message);
+        }
+      };
+      reader.readAsArrayBuffer(file);
+    } catch (err) {
+      alert('Error al procesar archivo: ' + err.message);
+    }
+  }
+
+  event.target.value = '';
+}
+
 async function sendConcentradoActions(actions, successMsg) {
   if (!state.isStaticMode) {
     showToast('⏳ Actualizando CONCENTRADO ML LOGISTICS ELIEZER 2026.xlsx...');

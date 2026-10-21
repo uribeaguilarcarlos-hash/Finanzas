@@ -1734,6 +1734,37 @@ def download_custom_concentrado(req: ApplyConcentradoFixesRequest):
     )
 
 
+@app.post("/api/concentrado/upload")
+async def upload_concentrado(file: UploadFile = File(...)):
+    if not file.filename.lower().endswith(".xlsx"):
+        raise HTTPException(status_code=400, detail="Solo se permiten archivos Excel (.xlsx)")
+
+    # 1. Crear respaldo del Concentrado actual si existe
+    backup_dir = BASE_DIR / "backups"
+    backup_dir.mkdir(exist_ok=True)
+    ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+    if CONCENTRADO_PATH.exists():
+        shutil.copy2(str(CONCENTRADO_PATH), str(backup_dir / f"CONCENTRADO_BACKUP_BEFORE_UPLOAD_{ts}.xlsx"))
+
+    # 2. Guardar el nuevo Concentrado reemplazando el archivo maestro
+    contents = await file.read()
+    with open(str(CONCENTRADO_PATH), "wb") as f:
+        f.write(contents)
+
+    # 3. También actualizar la copia estática para Azure Static Web Apps
+    static_data_conc = BASE_DIR / "app" / "static" / "data" / "CONCENTRADO ML LOGISTICS ELIEZER 2026.xlsx"
+    static_data_conc.parent.mkdir(parents=True, exist_ok=True)
+    with open(str(static_data_conc), "wb") as f:
+        f.write(contents)
+
+    root_data_conc = BASE_DIR / "data" / "CONCENTRADO ML LOGISTICS ELIEZER 2026.xlsx"
+    if root_data_conc.parent.exists():
+        with open(str(root_data_conc), "wb") as f:
+            f.write(contents)
+
+    return {"ok": True, "message": "Nuevo Concentrado subido y establecido como la nueva ley con éxito"}
+
+
 @app.get("/api/concentrado/download")
 def download_concentrado():
     if not CONCENTRADO_PATH.exists():
