@@ -441,7 +441,72 @@ async function refreshActiveStatementData() {
 
     let concData = await fetchStaticData(`concentrado/${state.activeRawDate}.json`);
     if (!concData) {
-      concData = await fetchStaticData(`concentrado/${state.statements[0].raw_date}.json`);
+      const knownBaseRaw = state.statements.find(s => s.raw_date !== state.activeRawDate)?.raw_date || '20261014';
+      const baseConc = await fetchStaticData(`concentrado/${knownBaseRaw}.json`);
+      if (baseConc) {
+        concData = JSON.parse(JSON.stringify(baseConc));
+        concData.raw_date = state.activeRawDate;
+
+        // Recolectar todas las referencias ya existentes en las hojas del Concentrado y en el Statement base
+        const baseRefs = new Set();
+        const baseStmtDetail = await getStaticDetail(knownBaseRaw);
+        (baseStmtDetail?.master_items || []).forEach(it => baseRefs.add(String(it.ref_no || '').trim().toUpperCase()));
+        (concData.discrepancies || []).forEach(d => baseRefs.add(String(d.ref_no || '').trim().toUpperCase()));
+
+        // Referencias del nuevo Statement que no existían
+        const currentItems = state.currentDetail?.master_items || [];
+        const newMissing = [];
+        currentItems.forEach(m => {
+          const rUp = String(m.ref_no || '').trim().toUpperCase();
+          if (rUp && !baseRefs.has(rUp)) {
+            const targetSheet = guessConcentradoSheetClient(m, concData.sheet_distribution);
+            const sheetMeta = (concData.sheet_distribution || []).find(s => s.sheet === targetSheet);
+            const calc = computeConcentradoTargetClient(m, targetSheet, sheetMeta);
+            newMissing.push({
+              ref_no: m.ref_no,
+              customer: m.customer,
+              customer_for: m.customer_for,
+              container: m.container,
+              etd: m.etd,
+              eta: m.eta,
+              update_eta: m.update_eta,
+              shipping_line: m.shipping_line,
+              pol: m.pol,
+              pod: m.pod,
+              sea_freight: m.sea_freight,
+              fob_cost: m.fob_cost,
+              inland_fee: m.inland_fee,
+              total_cost: m.total_cost,
+              previo: m.previo,
+              insurance: m.insurance,
+              exw: m.exw_fee,
+              amend: m.amend_fee,
+              target_sheet: targetSheet,
+              ...calc,
+            });
+          }
+        });
+        concData.missing_in_concentrado = newMissing;
+        concData.summary.missing_refs_count = newMissing.length;
+
+        // Actualizar métricas financieras para el nuevo statement
+        if (concData.financials) {
+          const currStmt = state.currentDetail?.statement;
+          if (currStmt) {
+            concData.financials.debo_eliezer = currStmt.acc_balance;
+            concData.financials.eliezer_pending_receive = currStmt.acc_pending_receive;
+            concData.financials.eliezer_total_paid = currStmt.acc_total_rcvd;
+            concData.financials.eliezer_total_cost_acc = currStmt.acc_total_cost;
+            concData.financials.total_containers = currStmt.total_containers;
+            concData.financials.costo_total_eliezer_2026 = currStmt.total_cost_master;
+            concData.financials.flujo_neto_cartera = Number((concData.financials.me_deben_clientes - currStmt.acc_balance).toFixed(2));
+            concData.financials.ganancia_bruta_operativa = Number((concData.financials.facturado_clientes_2026 - currStmt.total_cost_master).toFixed(2));
+            if (concData.financials.facturado_clientes_2026 > 0) {
+              concData.financials.margen_porcentaje = Number(((concData.financials.ganancia_bruta_operativa / concData.financials.facturado_clientes_2026) * 100).toFixed(2));
+            }
+          }
+        }
+      }
     }
     state.concentrado = concData;
   }
@@ -555,8 +620,11 @@ function renderDashboard() {
     costTbody.innerHTML = diff.cost_changes.map(c => renderCostChangeRow(c)).join('');
   }
 
-  document.getElementById('dash-new-shipments-title').textContent =
-    `🚢 Nuevos Embarques Agregados en este Statement (${diff.new_shipments.length})`;
+  document.getElementById('dash-new-shipments-title').innerHTML =
+    `🚢 Nuevos Embarques Agregados en este Statement (${diff.new_shipments.length})
+     <button class="btn-secondary" style="margin-left:12px; font-size:11.5px; padding:4px 10px; font-weight:700; background:#EFF6FF; color:#1D4ED8; border-color:#BFDBFE;" onclick="showNewShipmentsInMaster()">
+       Ver los ${diff.new_shipments.length} en Master List ➔
+     </button>`;
 
   const newTbody = document.getElementById('dash-new-shipments-tbody');
   if (diff.new_shipments.length === 0) {
@@ -982,13 +1050,23 @@ function debounceLoadMaster() {
   masterDebounceTimer = setTimeout(() => loadMasterList(), 220);
 }
 
+function showNewShipmentsInMaster() {
+  switchTab('master');
+  const chkNew = document.getElementById('master-new-only');
+  if (chkNew) chkNew.checked = true;
+  loadMasterList();
+}
+
 async function loadMasterList() {
   if (!state.activeRawDate) return;
   const search = document.getElementById('master-search').value.trim().toLowerCase();
   const cust = document.getElementById('master-customer-filter').value;
-  const extraOnly = document.getElementById('master-extra-only').checked;
+  const extraOnly = document.getElementById('master-extra-only')?.checked;
+  const newOnly = document.getElementById('master-new-only')?.checked;
 
-  if (!state.isStaticMode) {
+  const newRefsSet = new Set((state.currentDiff?.new_shipments || []).map(n => n.ref_no));
+
+  if (!state.isStaticMode && !newOnly) {
     const params = new URLSearchParams();
     if (search) params.set('search', search);
     if (cust) params.set('customer_for', cust);
@@ -1000,6 +1078,7 @@ async function loadMasterList() {
   } else {
     const allItems = state.currentDetail?.master_items || [];
     const filtered = allItems.filter(item => {
+      if (newOnly && !newRefsSet.has(item.ref_no)) return false;
       if (cust && item.customer_for !== cust) return false;
       if (extraOnly && !((item.amend_fee > 0) || (item.exw_fee > 0) || (item.inland_fee > 0) || (item.previo > 0) || (item.insurance > 0))) {
         return false;
@@ -1031,12 +1110,12 @@ function renderMasterTable(items) {
     const isChanged = changedRefs.has(item.ref_no);
     const isNew = newRefs.has(item.ref_no);
     return `
-      <tr style="${isChanged ? 'background:#FFF9E6;' : ''}">
+      <tr style="${isNew ? 'background:#EFF6FF;' : (isChanged ? 'background:#FFF9E6;' : '')}">
         <td style="color:var(--text-muted);">${item.row_num}</td>
         <td style="white-space:nowrap;">
           <span class="ref-link" onclick="openRefHistory('${esc(item.ref_no)}')">${esc(item.ref_no)}</span>
           ${isChanged ? '<span class="status-pill" style="margin-left:4px; padding:2px 6px; font-size:10px;">Mod</span>' : ''}
-          ${isNew ? '<span class="status-pill new-item" style="margin-left:4px; padding:2px 6px; font-size:10px;">Nuevo</span>' : ''}
+          ${isNew ? '<span class="status-pill" style="margin-left:4px; padding:2px 6px; font-size:10px; background:#DBEAFE; color:#1E40AF; border:1px solid #93C5FD; font-weight:700;">✨ Nuevo</span>' : ''}
         </td>
         <td>${esc(item.customer)}</td>
         <td><strong>${esc(item.customer_for)}</strong></td>
@@ -1249,54 +1328,10 @@ async function loadConcentradoOverview() {
     const res = await fetch(`/api/concentrado/overview?raw_date=${encodeURIComponent(state.activeRawDate)}`);
     state.concentrado = await res.json();
   } else {
-    let concData = await fetchStaticData(`concentrado/${state.activeRawDate}.json`);
-    if (!concData) {
-      // Statement nuevo subido en el navegador: partimos de la base del Concentrado y detectamos referencias nuevas
-      const baseConc = await fetchStaticData(`concentrado/${state.statements.find(s => s.raw_date !== state.activeRawDate)?.raw_date || '20260414'}.json`);
-      if (baseConc) {
-        concData = JSON.parse(JSON.stringify(baseConc));
-        const baseRefs = new Set();
-        const latestBaseStmt = await fetchStaticData(`statements/20260414.json`);
-        (latestBaseStmt?.master_items || []).forEach(it => baseRefs.add(String(it.ref_no || '').trim().toUpperCase()));
-        (concData.discrepancies || []).forEach(d => baseRefs.add(String(d.ref_no || '').trim().toUpperCase()));
-
-        const currentItems = state.currentDetail?.master_items || [];
-        const newMissing = [];
-        currentItems.forEach(m => {
-          const rUp = String(m.ref_no || '').trim().toUpperCase();
-          if (rUp && !baseRefs.has(rUp)) {
-            const targetSheet = guessConcentradoSheetClient(m, concData.sheet_distribution);
-            const sheetMeta = (concData.sheet_distribution || []).find(s => s.sheet === targetSheet);
-            const calc = computeConcentradoTargetClient(m, targetSheet, sheetMeta);
-            newMissing.push({
-              ref_no: m.ref_no,
-              customer: m.customer,
-              customer_for: m.customer_for,
-              container: m.container,
-              etd: m.etd,
-              eta: m.eta,
-              update_eta: m.update_eta,
-              shipping_line: m.shipping_line,
-              pol: m.pol,
-              pod: m.pod,
-              sea_freight: m.sea_freight,
-              fob_cost: m.fob_cost,
-              inland_fee: m.inland_fee,
-              total_cost: m.total_cost,
-              previo: m.previo,
-              insurance: m.insurance,
-              exw: m.exw_fee,
-              amend: m.amend_fee,
-              target_sheet: targetSheet,
-              ...calc,
-            });
-          }
-        });
-        concData.missing_in_concentrado = newMissing;
-        concData.summary.missing_refs_count = newMissing.length;
-      }
+    // En modo estático ya se pobló y preparó en refreshActiveStatementData()
+    if (!state.concentrado || state.concentrado.raw_date !== state.activeRawDate) {
+      await refreshActiveStatementData();
     }
-    state.concentrado = concData;
   }
   renderConcentradoView();
   renderDashboard();
@@ -1714,31 +1749,36 @@ async function downloadConcentradoFile() {
         hdrRow.forEach((h, cIdx) => {
           if (!h) return;
           const addr = XLSX.utils.encode_cell({ r: nextR, c: cIdx });
-          if (h.includes('REF/INV')) ws[addr] = { t: 's', v: it.ref_no || '' };
-          else if (h === 'CUSTOMER') ws[addr] = { t: 's', v: it.customer || '' };
-          else if (h === 'CUSTOMER FOR') ws[addr] = { t: 's', v: it.customer_for || '' };
-          else if (h === 'CONTAINER') ws[addr] = { t: 's', v: it.container || '' };
-          else if (h === 'ETD') ws[addr] = { t: 's', v: it.etd || '' };
-          else if (h === 'ETA') ws[addr] = { t: 's', v: it.update_eta || it.eta || '' };
-          else if (h === 'SHIPPING LINE') ws[addr] = { t: 's', v: it.shipping_line || '' };
-          else if (h === 'POL') ws[addr] = { t: 's', v: it.pol || '' };
-          else if (h === 'POD') ws[addr] = { t: 's', v: it.pod || '' };
-          else if (h === 'TOTAL COST') ws[addr] = { t: 'n', v: Number(it.suggested_total_cost || 0) };
-          else if (h.includes('RAIL')) ws[addr] = { t: 'n', v: Number(it.suggested_rail || 0) };
+          const blueStyle = {
+            fill: { fgColor: { rgb: "D9E1F2" } },
+            font: { color: { rgb: "1F497D" }, bold: true }
+          };
+
+          if (h.includes('REF/INV')) ws[addr] = { t: 's', v: it.ref_no || '', s: blueStyle };
+          else if (h === 'CUSTOMER') ws[addr] = { t: 's', v: it.customer || '', s: blueStyle };
+          else if (h === 'CUSTOMER FOR') ws[addr] = { t: 's', v: it.customer_for || '', s: blueStyle };
+          else if (h === 'CONTAINER') ws[addr] = { t: 's', v: it.container || '', s: blueStyle };
+          else if (h === 'ETD') ws[addr] = { t: 's', v: it.etd || '', s: blueStyle };
+          else if (h === 'ETA') ws[addr] = { t: 's', v: it.update_eta || it.eta || '', s: blueStyle };
+          else if (h === 'SHIPPING LINE') ws[addr] = { t: 's', v: it.shipping_line || '', s: blueStyle };
+          else if (h === 'POL') ws[addr] = { t: 's', v: it.pol || '', s: blueStyle };
+          else if (h === 'POD') ws[addr] = { t: 's', v: it.pod || '', s: blueStyle };
+          else if (h === 'TOTAL COST') ws[addr] = { t: 'n', v: Number(it.suggested_total_cost || 0), s: blueStyle };
+          else if (h.includes('RAIL')) ws[addr] = { t: 'n', v: Number(it.suggested_rail || 0), s: blueStyle };
           else if (h.includes('PREVIO') && h.includes('INSURANCE')) {
-            ws[addr] = { t: 'n', v: Number(it.suggested_previo_ins_comb ?? ((it.suggested_previo || 0) + (it.suggested_insurance || 0))) };
+            ws[addr] = { t: 'n', v: Number(it.suggested_previo_ins_comb ?? ((it.suggested_previo || 0) + (it.suggested_insurance || 0))), s: blueStyle };
           } else if (h.includes('PREVIO')) {
-            ws[addr] = { t: 'n', v: Number(it.suggested_previo || 0) };
+            ws[addr] = { t: 'n', v: Number(it.suggested_previo || 0), s: blueStyle };
           } else if (h.includes('INSURANCE')) {
-            ws[addr] = { t: 'n', v: Number(hasSepPrevIns ? (it.suggested_insurance || 0) : (it.suggested_previo_ins_comb ?? ((it.suggested_previo || 0) + (it.suggested_insurance || 0)))) };
+            ws[addr] = { t: 'n', v: Number(hasSepPrevIns ? (it.suggested_insurance || 0) : (it.suggested_previo_ins_comb ?? ((it.suggested_previo || 0) + (it.suggested_insurance || 0)))), s: blueStyle };
           } else if (h.includes('EXW') && !h.includes('AMEND') && hasSepExwAmend) {
-            ws[addr] = { t: 'n', v: Number(it.suggested_exw_only ?? it.exw ?? 0) };
+            ws[addr] = { t: 'n', v: Number(it.suggested_exw_only ?? it.exw ?? 0), s: blueStyle };
           } else if (h.includes('AMEND') && !h.includes('EXW') && hasSepExwAmend) {
-            ws[addr] = { t: 'n', v: Number(it.suggested_amend_only ?? it.amend ?? 0) };
+            ws[addr] = { t: 'n', v: Number(it.suggested_amend_only ?? it.amend ?? 0), s: blueStyle };
           } else if (h.includes('EXW') || h.includes('AMEND') || h.includes('OTHER COST')) {
-            ws[addr] = { t: 'n', v: Number(it.suggested_exw_amend || 0) };
+            ws[addr] = { t: 'n', v: Number(it.suggested_exw_amend || 0), s: blueStyle };
           } else if (h === 'BILL AMT') {
-            ws[addr] = { t: 'n', v: Number(it.suggested_bill_amt || it.suggested_total_cost || 0) };
+            ws[addr] = { t: 'n', v: Number(it.suggested_bill_amt || it.suggested_total_cost || 0), s: blueStyle };
           }
         });
       }

@@ -176,7 +176,7 @@
 
           <!-- 3 KPI Cards with Golden/Taupe Sparklines (matching reference image) -->
           <div class="kpi-row">
-            <div class="kpi-card" onclick="switchTab('master')">
+            <div class="kpi-card" style="cursor:pointer;" onclick="showNewShipmentsInMaster()" title="Haz clic para ver solo los nuevos en Master List">
               <div class="kpi-label">
                 <span>Embarques en Master List</span>
                 <span class="kpi-delta-pill" id="kpi-containers-delta">+0 nuevos</span>
@@ -492,6 +492,10 @@
               <label style="display:flex; align-items:center; gap:6px; font-size:12.5px; font-weight:600; cursor:pointer; background:var(--bg-subtle); padding:7px 12px; border-radius:10px; border:1px solid var(--border-warm);">
                 <input type="checkbox" id="master-extra-only" onchange="loadMasterList()" />
                 Solo con Cargos Extras (Amend / EXW / Inland / Previo / Seg)
+              </label>
+              <label style="display:flex; align-items:center; gap:6px; font-size:12.5px; font-weight:700; cursor:pointer; background:#EFF6FF; color:#1D4ED8; padding:7px 12px; border-radius:10px; border:1px solid #BFDBFE;">
+                <input type="checkbox" id="master-new-only" onchange="loadMasterList()" />
+                ✨ Solo Nuevos en este Statement
               </label>
             </div>
 

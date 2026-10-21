@@ -11,6 +11,7 @@ from pathlib import Path
 from typing import Optional, List, Dict, Any
 
 import openpyxl
+from openpyxl.styles import PatternFill, Font
 from fastapi import FastAPI, UploadFile, File, Form, HTTPException, Query
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import FileResponse, JSONResponse
@@ -1516,49 +1517,57 @@ def apply_concentrado_fixes(req: ApplyConcentradoFixesRequest):
             has_sep_prev_ins = ("PREVIO" in hdr_row and "INSURANCE" in hdr_row)
             has_sep_exw_amend = (any("EXW" in h for h in hdr_row if h) and any("AMEND" in h for h in hdr_row if h))
 
+            # Openpyxl style for highlighting new references in blue
+            blue_fill = PatternFill(start_color="D9E1F2", end_color="D9E1F2", fill_type="solid")
+            blue_font = Font(color="1F497D", bold=True)
+
             for col_i, h in enumerate(hdr_row, start=1):
                 if not h:
                     continue
+                cell = ws.cell(row=next_row, column=col_i)
+                cell.fill = blue_fill
+                cell.font = blue_font
+
                 if "REF/INV" in h:
-                    ws.cell(row=next_row, column=col_i, value=it.get("ref_no"))
+                    cell.value = it.get("ref_no")
                 elif h == "CUSTOMER":
-                    ws.cell(row=next_row, column=col_i, value=it.get("customer"))
+                    cell.value = it.get("customer")
                 elif h == "CUSTOMER FOR":
-                    ws.cell(row=next_row, column=col_i, value=it.get("customer_for"))
+                    cell.value = it.get("customer_for")
                 elif h == "CONTAINER":
-                    ws.cell(row=next_row, column=col_i, value=it.get("container"))
+                    cell.value = it.get("container")
                 elif h == "ETD":
-                    ws.cell(row=next_row, column=col_i, value=it.get("etd"))
+                    cell.value = it.get("etd")
                 elif h == "ETA":
-                    ws.cell(row=next_row, column=col_i, value=it.get("update_eta") or it.get("eta"))
+                    cell.value = it.get("update_eta") or it.get("eta")
                 elif h == "SHIPPING LINE":
-                    ws.cell(row=next_row, column=col_i, value=it.get("shipping_line"))
+                    cell.value = it.get("shipping_line")
                 elif h == "POL":
-                    ws.cell(row=next_row, column=col_i, value=it.get("pol"))
+                    cell.value = it.get("pol")
                 elif h == "POD":
-                    ws.cell(row=next_row, column=col_i, value=it.get("pod"))
+                    cell.value = it.get("pod")
                 elif h == "TOTAL COST":
-                    ws.cell(row=next_row, column=col_i, value=it.get("suggested_total_cost", 0.0))
+                    cell.value = it.get("suggested_total_cost", 0.0)
                 elif "RAIL" in h:
-                    ws.cell(row=next_row, column=col_i, value=it.get("suggested_rail", 0.0))
+                    cell.value = it.get("suggested_rail", 0.0)
                 elif "PREVIO" in h and "INSURANCE" in h:
-                    ws.cell(row=next_row, column=col_i, value=it.get("suggested_previo_ins_comb", (it.get("suggested_previo", 0.0) + it.get("suggested_insurance", 0.0))))
+                    cell.value = it.get("suggested_previo_ins_comb", (it.get("suggested_previo", 0.0) + it.get("suggested_insurance", 0.0)))
                 elif "PREVIO" in h:
-                    ws.cell(row=next_row, column=col_i, value=it.get("suggested_previo", 0.0))
+                    cell.value = it.get("suggested_previo", 0.0)
                 elif "INSURANCE" in h:
                     if has_sep_prev_ins:
-                        ws.cell(row=next_row, column=col_i, value=it.get("suggested_insurance", 0.0))
+                        cell.value = it.get("suggested_insurance", 0.0)
                     else:
                         # Hoja con columna única llamada INSURANCE (ej. SALOMON JASQUI) donde van sumados Previo + Seguro
-                        ws.cell(row=next_row, column=col_i, value=it.get("suggested_previo_ins_comb", (it.get("suggested_previo", 0.0) + it.get("suggested_insurance", 0.0))))
+                        cell.value = it.get("suggested_previo_ins_comb", (it.get("suggested_previo", 0.0) + it.get("suggested_insurance", 0.0)))
                 elif "EXW" in h and "AMEND" not in h and has_sep_exw_amend:
-                    ws.cell(row=next_row, column=col_i, value=it.get("suggested_exw_only", it.get("exw", 0.0)))
+                    cell.value = it.get("suggested_exw_only", it.get("exw", 0.0))
                 elif "AMEND" in h and "EXW" not in h and has_sep_exw_amend:
-                    ws.cell(row=next_row, column=col_i, value=it.get("suggested_amend_only", it.get("amend", 0.0)))
+                    cell.value = it.get("suggested_amend_only", it.get("amend", 0.0))
                 elif "EXW" in h or "AMEND" in h or "OTHER COST" in h:
-                    ws.cell(row=next_row, column=col_i, value=it.get("suggested_exw_amend", 0.0))
+                    cell.value = it.get("suggested_exw_amend", 0.0)
                 elif "DETENTION" in h:
-                    ws.cell(row=next_row, column=col_i, value=it.get("suggested_detention", it.get("demurrage", 0.0)))
+                    cell.value = it.get("suggested_detention", it.get("demurrage", 0.0))
                 elif h == "BILL AMT":
                     # Buscar fórmula en la fila inmediata anterior o en alguna fila superior de la hoja
                     formula_copied = False
@@ -1566,11 +1575,11 @@ def apply_concentrado_fixes(req: ApplyConcentradoFixesRequest):
                         prev_formula = ws.cell(row=search_r, column=col_i).value
                         if isinstance(prev_formula, str) and prev_formula.startswith("="):
                             new_f = re.sub(rf"\b([A-Z]+){search_r}\b", rf"\g<1>{next_row}", prev_formula)
-                            ws.cell(row=next_row, column=col_i, value=new_f)
+                            cell.value = new_f
                             formula_copied = True
                             break
                     if not formula_copied:
-                        ws.cell(row=next_row, column=col_i, value=it.get("suggested_bill_amt", it.get("suggested_total_cost", 0.0)))
+                        cell.value = it.get("suggested_bill_amt", it.get("suggested_total_cost", 0.0))
             applied_count += 1
 
     try:
